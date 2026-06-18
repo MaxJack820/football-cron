@@ -1,0 +1,27 @@
+name: 足球预测·后台定时更新
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 取出仓库文件
+        uses: actions/checkout@v4
+      - name: 准备 Node 环境
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 安装无头浏览器
+        run: |
+          npm init -y
+          npm i playwright
+          npx playwright install --with-deps chromium
+      - name: 运行一次预测
+        run: node run.js
+        env:
+          AF_KEY: ${{ secrets.AF_KEY }}
