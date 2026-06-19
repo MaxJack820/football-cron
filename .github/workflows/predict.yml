@@ -3,6 +3,9 @@ name: 足球预测·后台定时更新
 on:
   schedule:
     - cron: '0 * * * *'
+    - cron: '15 * * * *'
+    - cron: '30 * * * *'
+    - cron: '45 * * * *'
   workflow_dispatch: {}
 
 jobs:
