@@ -32,9 +32,10 @@ if (!AF_KEY) {
   console.log('打开页面:', url);
   await page.goto(url, { waitUntil: 'load' });
 
-  // 等 2.5 分钟，让"拉云端赛程 → 扫真实赛程 → 预测临近场 → 写回云端"全部跑完
-  console.log('正在后台运行自动预测，请等待约 150 秒…');
-  await page.waitForTimeout(150000);
+  // 等约 5 分钟，让"预测临近场写回云端 → 扫真实赛程"全部跑完。
+  // (页面端已改为"先预测后扫日程";这里给足时间,避免预测还没写完云端就关浏览器→远期场停在中午那次)
+  console.log('正在后台运行自动预测，请等待约 300 秒…');
+  await page.waitForTimeout(300000);
 
   await browser.close();
   console.log('✅ 完成：预测已写入云端 Supabase。');
