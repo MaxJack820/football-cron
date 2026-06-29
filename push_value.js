@@ -43,13 +43,15 @@ async function bark(title, body) {
 (async () => {
   const now = Date.now(), bj = bjParts();
   if (!inWindow(bj.hour) && !DRY) { console.log(`当前北京 ${bj.hour}:xx 非推送窗(12:00-05:00),跳过`); return; }
-  const [hist, fd, st] = await Promise.all([sbGet('fp_hist5'), sbGet('fp_fetchData'), sbGet('fp_pushState')]);
+  const [hist, fd, st, vbRaw] = await Promise.all([sbGet('fp_hist5'), sbGet('fp_fetchData'), sbGet('fp_pushState'), sbGet('fp_valueBets')]);
   if (!hist) { console.error('读不到 fp_hist5'); process.exit(1); }
   const fetchData = fd || {};
   const bday = bettingDay();
   let state = (st && st.date === bday) ? st : { date: bday, pushed: [] };
   const pushedSet = new Set(state.pushed);
   let todayCount = state.pushed.length;
+  const valueBets = Array.isArray(vbRaw) ? vbRaw : [];          // #5 实盘推送战绩:推过的号(成功才记),结算后在价值页统计真ROI
+  const vbSet = new Set(valueBets.map(b => b.key));
 
   const cands = [];
   for (const r of hist) {
@@ -66,19 +68,21 @@ async function bark(title, body) {
     if (!(pH > 0 && pA > 0 && oH > 1.05 && oA > 1.05)) continue;
     const evH = pH * oH - 1, evA = pA * oA - 1, betH = evH >= evA, ev = betH ? evH : evA;
     if (ev < EV_MIN) continue;
-    cands.push({ key, lg: r.league || '', h: r.h, a: r.a, side: betH ? r.h : r.a, sline: betH ? line : -line, odds: betH ? oH : oA, ev, stake: ev >= EV_HI ? STAKE_HI : STAKE });
+    cands.push({ key, lg: r.league || '', h: r.h, a: r.a, side: betH ? r.h : r.a, sline: betH ? line : -line, betSide: betH ? 'home' : 'away', line, md: r.matchDate || '', ko, odds: betH ? oH : oA, ev, stake: ev >= EV_HI ? STAKE_HI : STAKE });
   }
   cands.sort((a, b) => b.ev - a.ev);
 
   let sent = 0;
   for (const c of cands) {
     if (todayCount >= DAILY_CAP) { console.log('已达每日上限', DAILY_CAP); break; }
-    todayCount++; sent++;
     const title = `⚽价值号 EV+${(c.ev * 100).toFixed(0)}% · 注${c.stake}`;
-    const body = `[${c.lg}] ${c.h} vs ${c.a}\n${c.side} ${fmtLine(c.sline)} @${c.odds.toFixed(2)}\n今日第 ${todayCount}/${DAILY_CAP} 注`;
-    if (DRY) console.log('[DRY] 推送 →', title, '|', body.replace(/\n/g, ' / '));
-    else { await bark(title, body); state.pushed.push(c.key); pushedSet.add(c.key); }
+    const body = `[${c.lg}] ${c.h} vs ${c.a}\n${c.side} ${fmtLine(c.sline)} @${c.odds.toFixed(2)}\n今日第 ${todayCount + 1}/${DAILY_CAP} 注`;
+    if (DRY) { console.log('[DRY] 推送 →', title, '|', body.replace(/\n/g, ' / ')); todayCount++; sent++; continue; }
+    const ok = await bark(title, body);   // #1 只有推送成功才计入去重/计数,失败留到下轮重试
+    if (!ok) { console.log('⚠️ Bark失败,本场下轮重试:', c.h, 'vs', c.a); continue; }
+    state.pushed.push(c.key); pushedSet.add(c.key); todayCount++; sent++;
+    if (!vbSet.has(c.key)) { valueBets.push({ key: c.key, lg: c.lg, h: c.h, a: c.a, md: c.md, betSide: c.betSide, line: c.line, odds: c.odds, ev: +c.ev.toFixed(3), stake: c.stake, ko: c.ko, pushedAt: Date.now() }); vbSet.add(c.key); }
   }
-  if (!DRY && sent > 0) await sbSet('fp_pushState', state);
+  if (!DRY && sent > 0) { await sbSet('fp_pushState', state); await sbSet('fp_valueBets', valueBets); }
   console.log(`完成 · 候选 ${cands.length} · 本轮推送 ${sent} · 今日累计 ${todayCount}/${DAILY_CAP} · 投注日 ${bday}${DRY ? ' (DRY-RUN,未真推/未写云)' : ''}`);
 })().catch(e => { console.error(e); process.exit(1); });
