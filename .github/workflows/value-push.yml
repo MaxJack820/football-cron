@@ -1,0 +1,23 @@
+# 放到 cron 仓库的 .github/workflows/value-push.yml
+# 每20分钟跑一次;脚本内部只在北京 12:00–05:00 真正推送,其余时间空跑不打扰。
+name: value-push
+on:
+  schedule:
+    - cron: '*/20 * * * *'   # 每20分钟(UTC;脚本自带北京时间窗过滤)
+  workflow_dispatch: {}       # 也可在 Actions 页手动点 Run 测试
+concurrency:
+  group: value-push
+  cancel-in-progress: false
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 推送价值号
+        run: node push_value.js
+        env:
+          BARK_KEY: ${{ secrets.BARK_KEY }}
+          # SB_KEY 可不填(脚本内置 publishable);要覆盖就在 Secrets 加 SB_KEY
