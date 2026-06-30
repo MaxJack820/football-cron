@@ -1,13 +1,8 @@
-# 放到 cron 仓库的 .github/workflows/value-push.yml
-# 每20分钟跑一次;脚本内部只在北京 12:00–05:00 真正推送,其余时间空跑不打扰。
-name: value-push
+# 价值推送已并入 predict.yml(跟 cron-job.org 可靠触发一起跑)。
+# 这里只保留手动触发,作为单独测试用,不再走不靠谱的 GitHub schedule。
+name: value-push (手动测试)
 on:
-  schedule:
-    - cron: '*/20 * * * *'   # 每20分钟(UTC;脚本自带北京时间窗过滤)
-  workflow_dispatch: {}       # 也可在 Actions 页手动点 Run 测试
-concurrency:
-  group: value-push
-  cancel-in-progress: false
+  workflow_dispatch: {}
 jobs:
   push:
     runs-on: ubuntu-latest
@@ -20,4 +15,3 @@ jobs:
         run: node push_value.js
         env:
           BARK_KEY: ${{ secrets.BARK_KEY }}
-          # SB_KEY 可不填(脚本内置 publishable);要覆盖就在 Secrets 加 SB_KEY

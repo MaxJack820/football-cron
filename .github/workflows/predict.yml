@@ -28,3 +28,11 @@ jobs:
         run: node run.js
         env:
           AF_KEY: ${{ secrets.AF_KEY }}
+      # ↓↓↓ 价值号推送:跟着这条可靠触发一起跑(预测刚写完云端→读最新数据推送)。
+      # 即使上面预测步骤失败也照推(if: always),因为它独立读云端。脚本内部自带北京12:00–05:00时间窗+EV≥8%+去重+每日封顶。
+      - name: 推送价值号(Bark)
+        if: always()
+        run: node push_value.js
+        env:
+          BARK_KEY: ${{ secrets.BARK_KEY }}
+          # SB_KEY 可不填(脚本内置 publishable)
