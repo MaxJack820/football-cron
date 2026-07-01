@@ -197,15 +197,27 @@ function summarizeValueBets(valueBets, hist) {
     const conf = r && r.ahRec ? (b.betSide === 'home' ? +r.ahRec.cover : +r.ahRec.lose) : null;
     addGrade(ensure(value.byConf, confBucket(conf)), grade);
 
-    const cv = closeVersion(r, b.ko);
-    if (cv && cv.ahRec && cv.ahRec.line != null) {
+    const closeSnap = b.closeSnapshot || (Array.isArray(b.snapshots) ? b.snapshots[b.snapshots.length - 1] : null);
+    if (closeSnap && closeSnap.ahLine != null) {
       value.clv.n++;
       const recSideLine = b.betSide === 'home' ? +b.line : -b.line;
-      const closeSideLine = b.betSide === 'home' ? +cv.ahRec.line : -cv.ahRec.line;
+      const closeSideLine = b.betSide === 'home' ? +closeSnap.ahLine : -closeSnap.ahLine;
       if (recSideLine > closeSideLine + 0.001) value.clv.betterLine++;
-      if (cv.ahRec.side === b.betSide && cv.ahRec.odds != null) {
-        if (+b.odds > +cv.ahRec.odds + 0.001) value.clv.betterOdds++;
+      const closeOdds = b.betSide === 'home' ? closeSnap.ahOddsHome : closeSnap.ahOddsAway;
+      if (closeOdds != null) {
+        if (+b.odds > +closeOdds + 0.001) value.clv.betterOdds++;
       } else value.clv.missingCloseOdds++;
+    } else {
+      const cv = closeVersion(r, b.ko);
+      if (cv && cv.ahRec && cv.ahRec.line != null) {
+        value.clv.n++;
+        const recSideLine = b.betSide === 'home' ? +b.line : -b.line;
+        const closeSideLine = b.betSide === 'home' ? +cv.ahRec.line : -cv.ahRec.line;
+        if (recSideLine > closeSideLine + 0.001) value.clv.betterLine++;
+        if (cv.ahRec.side === b.betSide && cv.ahRec.odds != null) {
+          if (+b.odds > +cv.ahRec.odds + 0.001) value.clv.betterOdds++;
+        } else value.clv.missingCloseOdds++;
+      }
     }
 
     if (r && r.status === 'done' && grade.label && !['win', 'winHalf', 'push'].includes(grade.label)) {

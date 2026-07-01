@@ -54,6 +54,29 @@ async function bark(title, body) {
   const u = `${BARK_SERVER}/${BARK}/${encodeURIComponent(title)}/${encodeURIComponent(body)}?group=${encodeURIComponent('价值号')}&sound=bell`;
   const r = await fetch(u); return r.ok;
 }
+function marketSnapshot(fdo, ts = Date.now()) {
+  if (!fdo) return null;
+  return {
+    ts,
+    ahLine: fdo.ahLine != null ? +fdo.ahLine : null,
+    ahOddsHome: fdo.ahOddsHome != null ? +fdo.ahOddsHome : null,
+    ahOddsAway: fdo.ahOddsAway != null ? +fdo.ahOddsAway : null,
+    ouLine: fdo.ouLine != null ? +fdo.ouLine : null,
+    ouOddsOver: fdo.ouOddsOver != null ? +fdo.ouOddsOver : null,
+    ouOddsUnder: fdo.ouOddsUnder != null ? +fdo.ouOddsUnder : null,
+    sourceTs: fdo._afTs || null
+  };
+}
+function appendSnapshot(b, snap) {
+  if (!b || !snap || snap.ahLine == null) return false;
+  b.snapshots = Array.isArray(b.snapshots) ? b.snapshots : [];
+  const last = b.snapshots[b.snapshots.length - 1];
+  if (last && last.ahLine === snap.ahLine && last.ahOddsHome === snap.ahOddsHome && last.ahOddsAway === snap.ahOddsAway) return false;
+  b.snapshots.push(snap);
+  if (b.snapshots.length > 24) b.snapshots = b.snapshots.slice(-24);
+  b.closeSnapshot = snap;
+  return true;
+}
 
 (async () => {
   const now = Date.now(), bj = bjParts();
@@ -67,6 +90,15 @@ async function bark(title, body) {
   let todayCount = state.pushed.length;
   const valueBets = Array.isArray(vbRaw) ? vbRaw : [];          // #5 实盘推送战绩:推过的号(成功才记),结算后在价值页统计真ROI
   const vbSet = new Set(valueBets.map(b => b.key));
+  let valueChanged = false;
+
+  for (const b of valueBets) {
+    if (!b || !b.key) continue;
+    const ko = +b.ko || 0;
+    if (ko && ko <= now) continue;
+    const fdo = fetchData[`${b.h} vs ${b.a}`];
+    if (appendSnapshot(b, marketSnapshot(fdo))) valueChanged = true;
+  }
 
   const cands = [];
   for (const r of hist) {
@@ -83,7 +115,8 @@ async function bark(title, body) {
     if (!(pH > 0 && pA > 0 && oH > 1.05 && oA > 1.05)) continue;
     const evH = pH * oH - 1, evA = pA * oA - 1, betH = evH >= evA, ev = betH ? evH : evA;
     if (ev < EV_MIN) continue;
-    cands.push({ key, lg: r.league || '', h: r.h, a: r.a, side: betH ? r.h : r.a, sline: betH ? line : -line, betSide: betH ? 'home' : 'away', line, md: r.matchDate || '', ko, odds: betH ? oH : oA, ev, stake: ev >= EV_HI ? STAKE_HI : STAKE });
+    const snap = marketSnapshot(fdo, now);
+    cands.push({ key, lg: r.league || '', h: r.h, a: r.a, side: betH ? r.h : r.a, sline: betH ? line : -line, betSide: betH ? 'home' : 'away', line, md: r.matchDate || '', ko, odds: betH ? oH : oA, ev, stake: ev >= EV_HI ? STAKE_HI : STAKE, openSnapshot: snap, closeSnapshot: snap, snapshots: snap ? [snap] : [] });
   }
   cands.sort((a, b) => b.ev - a.ev);
 
@@ -96,8 +129,12 @@ async function bark(title, body) {
     const ok = await bark(title, body);   // #1 只有推送成功才计入去重/计数,失败留到下轮重试
     if (!ok) { console.log('⚠️ Bark失败,本场下轮重试:', c.h, 'vs', c.a); continue; }
     state.pushed.push(c.key); pushedSet.add(c.key); todayCount++; sent++;
-    if (!vbSet.has(c.key)) { valueBets.push({ key: c.key, lg: c.lg, h: c.h, a: c.a, md: c.md, betSide: c.betSide, line: c.line, odds: c.odds, ev: +c.ev.toFixed(3), stake: c.stake, ko: c.ko, pushedAt: Date.now() }); vbSet.add(c.key); }
+    if (!vbSet.has(c.key)) {
+      valueBets.push({ key: c.key, lg: c.lg, h: c.h, a: c.a, md: c.md, betSide: c.betSide, line: c.line, odds: c.odds, ev: +c.ev.toFixed(3), stake: c.stake, ko: c.ko, pushedAt: Date.now(), openSnapshot: c.openSnapshot, closeSnapshot: c.closeSnapshot, snapshots: c.snapshots });
+      vbSet.add(c.key); valueChanged = true;
+    }
   }
-  if (!DRY && sent > 0) { await sbSet('fp_pushState', state); await sbSet('fp_valueBets', valueBets); }
+  if (!DRY && sent > 0) await sbSet('fp_pushState', state);
+  if (!DRY && valueChanged) await sbSet('fp_valueBets', valueBets);
   console.log(`完成 · 候选 ${cands.length} · 本轮推送 ${sent} · 今日累计 ${todayCount}/${DAILY_CAP} · 投注日 ${bday}${DRY ? ' (DRY-RUN,未真推/未写云)' : ''}`);
 })().catch(e => { console.error(e); process.exit(1); });
