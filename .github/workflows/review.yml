@@ -1,0 +1,23 @@
+name: 足球预测·自动复盘日报
+
+on:
+  schedule:
+    # GitHub cron uses UTC. 04:30 UTC = 12:30 Beijing time, after the betting day settles.
+    - cron: '30 4 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取出仓库文件
+        uses: actions/checkout@v4
+      - name: 准备 Node 环境
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 生成复盘日报
+        run: node review_report.js
+        env:
+          BARK_KEY: ${{ secrets.BARK_KEY }}
+          SEND_REVIEW_BARK: '0'
