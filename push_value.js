@@ -14,15 +14,30 @@ const EV_MIN = 0.08, STAKE = 50, STAKE_HI = 75, EV_HI = 0.12, DAILY_CAP = 8, MAT
 if (!BARK && !DRY) { console.error('缺 BARK_KEY'); process.exit(1); }
 
 async function sbGet(key) {
-  const r = await fetch(`${SB}/rest/v1/kv_store?key=eq.${key}&select=value`, { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } });
-  const j = await r.json(); return (j && j[0] && j[0].value) || null;
+  const url = `${SB}/rest/v1/kv_store?key=eq.${key}&select=value`;
+  for (let i = 1; i <= 3; i++) {
+    try {
+      const r = await fetch(url, { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } });
+      const text = await r.text();
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${text.slice(0, 160) || 'empty response'}`);
+      if (!text.trim()) throw new Error('empty response');
+      const j = JSON.parse(text);
+      return (j && j[0] && j[0].value) || null;
+    } catch (e) {
+      console.log(`读取 Supabase ${key} 失败(${i}/3): ${e.message}`);
+      if (i === 3) return null;
+      await new Promise(resolve => setTimeout(resolve, i * 3000));
+    }
+  }
+  return null;
 }
 async function sbSet(key, value) {
-  await fetch(`${SB}/rest/v1/kv_store?on_conflict=key`, {
+  const r = await fetch(`${SB}/rest/v1/kv_store?on_conflict=key`, {
     method: 'POST',
     headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' },
     body: JSON.stringify({ key, value })
   });
+  if (!r.ok) console.log(`写入 Supabase ${key} 失败: HTTP ${r.status}`);
 }
 function bjParts(d = new Date()) {
   const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hour12: false }).formatToParts(d);
@@ -44,7 +59,7 @@ async function bark(title, body) {
   const now = Date.now(), bj = bjParts();
   if (!inWindow(bj.hour) && !DRY) { console.log(`当前北京 ${bj.hour}:xx 非推送窗(12:00-05:00),跳过`); return; }
   const [hist, fd, st, vbRaw] = await Promise.all([sbGet('fp_hist5'), sbGet('fp_fetchData'), sbGet('fp_pushState'), sbGet('fp_valueBets')]);
-  if (!hist) { console.error('读不到 fp_hist5'); process.exit(1); }
+  if (!hist) { console.log('读不到 fp_hist5，本轮不推送价值号；预测主任务不受影响'); return; }
   const fetchData = fd || {};
   const bday = bettingDay();
   let state = (st && st.date === bday) ? st : { date: bday, pushed: [] };

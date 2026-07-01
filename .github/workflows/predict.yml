@@ -33,6 +33,7 @@ jobs:
       - name: 推送价值号(Bark)
         if: always()
         run: node push_value.js
+        continue-on-error: true
         env:
           BARK_KEY: ${{ secrets.BARK_KEY }}
           # SB_KEY 可不填(脚本内置 publishable)
