@@ -120,6 +120,127 @@ function ahOdds(r) {
 function oneX2(r) {
   return r.predicted && r.actual ? { n: 1, hit: r.predicted === r.actual ? 1 : 0 } : { n: 0, hit: 0 };
 }
+function gradeOu({ isOver, line, odds = 2, stake = 1 }, r) {
+  if (!r || r.status !== 'done' || r.hg == null || r.ag == null) return { pending: true };
+  const total = r.hg + r.ag;
+  if (Math.abs(total - (+line || 0)) < 0.001) return { label: 'push', profit: 0, stake };
+  const win = total > (+line || 0) ? !!isOver : !isOver;
+  return win ? { label: 'win', profit: stake * (odds - 1), stake } : { label: 'lose', profit: -stake, stake };
+}
+function evBucket(ev) {
+  if (ev == null || !isFinite(+ev)) return '未知';
+  const e = +ev >= 1 ? +ev / 100 : +ev;
+  if (e < 0.08) return '<8%';
+  if (e < 0.10) return '8-10%';
+  if (e < 0.12) return '10-12%';
+  return '12%+';
+}
+function timeBucket(pushedAt, ko) {
+  if (!pushedAt || !ko) return '未知';
+  const h = (+ko - +pushedAt) / 3600e3;
+  if (!isFinite(h)) return '未知';
+  if (h <= 1) return '1小时内';
+  if (h <= 2) return '2小时内';
+  if (h <= 4) return '4小时内';
+  return '4小时外';
+}
+function histKey(r) { return `${r.h}|${r.a}|${r.matchDate || r.md || ''}`; }
+function findHistByKey(hist, key) { return (hist || []).find(r => r && histKey(r) === key) || null; }
+function closeVersion(r, ko) {
+  const versions = Array.isArray(r && r.versions) ? r.versions : [];
+  if (!versions.length) return r || null;
+  const beforeKo = versions.filter(v => !ko || !v.ts || new Date(v.ts).getTime() <= +ko);
+  return beforeKo[beforeKo.length - 1] || versions[versions.length - 1] || r || null;
+}
+function addErrorType(map, key) { map[key] = (map[key] || 0) + 1; }
+
+function summarizeMarketDirections(hist) {
+  const done = (hist || []).filter(r => r && r.status === 'done' && r.hg != null && r.ag != null);
+  const ah = { all: emptyStats(), byConf: {}, byLine: {}, byLeague: {} };
+  const ou = { all: emptyStats(), byConf: {}, byLine: {}, byLeague: {} };
+  for (const r of done) {
+    if (r.ahRec && r.ahRec.line != null && r.ahRec.side) {
+      const conf = r.ahRec.side === 'home' ? +r.ahRec.cover : +r.ahRec.lose;
+      const grade = gradeAh({ side: r.ahRec.side, line: r.ahRec.line, odds: ahOdds(r), stake: 1 }, r);
+      addGrade(ah.all, grade);
+      addGrade(ensure(ah.byConf, confBucket(conf)), grade);
+      addGrade(ensure(ah.byLine, lineBucket(r.ahRec.line)), grade);
+      addGrade(ensure(ah.byLeague, r.league || '其他'), grade);
+    }
+    if (r.ouRec && r.ouRec.line != null && r.ouRec.isOver != null) {
+      const conf = r.ouRec.isOver ? +r.ouRec.over : +r.ouRec.under;
+      const grade = gradeOu({ isOver: r.ouRec.isOver, line: r.ouRec.line, odds: r.ouRec.odds || 2, stake: 1 }, r);
+      addGrade(ou.all, grade);
+      addGrade(ensure(ou.byConf, confBucket(conf)), grade);
+      addGrade(ensure(ou.byLine, String(r.ouRec.line)), grade);
+      addGrade(ensure(ou.byLeague, r.league || '其他'), grade);
+    }
+  }
+  return {
+    ah: { all: finalizeStats(ah.all), byConf: finalizeMap(ah.byConf), byLine: finalizeMap(ah.byLine), byLeague: finalizeMap(ah.byLeague) },
+    ou: { all: finalizeStats(ou.all), byConf: finalizeMap(ou.byConf), byLine: finalizeMap(ou.byLine), byLeague: finalizeMap(ou.byLeague) }
+  };
+}
+
+function summarizeValueBets(valueBets, hist) {
+  const value = { all: emptyStats(), byEv: {}, byTime: {}, byConf: {}, byLine: {}, byLeague: {}, clv: { n: 0, betterLine: 0, betterOdds: 0, missingCloseOdds: 0 }, missingActualOdds: 0, errors: {}, recent: [] };
+  for (const b of valueBets || []) {
+    const r = findHistByKey(hist, b.key);
+    const odds = +(b.actualOdds || b.odds || 2);
+    if (!b.actualOdds) value.missingActualOdds++;
+    const grade = gradeAh({ side: b.betSide, line: b.line, odds, stake: +(b.stake || 1) }, r);
+    addGrade(value.all, grade);
+    addGrade(ensure(value.byEv, evBucket(b.ev)), grade);
+    addGrade(ensure(value.byTime, timeBucket(b.pushedAt, b.ko)), grade);
+    addGrade(ensure(value.byLine, lineBucket(b.line)), grade);
+    addGrade(ensure(value.byLeague, b.lg || (r && r.league) || '其他'), grade);
+    const conf = r && r.ahRec ? (b.betSide === 'home' ? +r.ahRec.cover : +r.ahRec.lose) : null;
+    addGrade(ensure(value.byConf, confBucket(conf)), grade);
+
+    const cv = closeVersion(r, b.ko);
+    if (cv && cv.ahRec && cv.ahRec.line != null) {
+      value.clv.n++;
+      const recSideLine = b.betSide === 'home' ? +b.line : -b.line;
+      const closeSideLine = b.betSide === 'home' ? +cv.ahRec.line : -cv.ahRec.line;
+      if (recSideLine > closeSideLine + 0.001) value.clv.betterLine++;
+      if (cv.ahRec.side === b.betSide && cv.ahRec.odds != null) {
+        if (+b.odds > +cv.ahRec.odds + 0.001) value.clv.betterOdds++;
+      } else value.clv.missingCloseOdds++;
+    }
+
+    if (r && r.status === 'done' && grade.label && !['win', 'winHalf', 'push'].includes(grade.label)) {
+      const sideDiff = b.betSide === 'home' ? r.hg - r.ag : r.ag - r.hg;
+      if (Math.abs(+b.line) >= 1) addErrorType(value.errors, '强队大热盘失真/深盘没穿');
+      else if (/冰岛超|巴乙/.test(b.lg || r.league || '')) addErrorType(value.errors, '冷门联赛数据质量差');
+      else if (sideDiff > 0) addErrorType(value.errors, '模型看对方向但盘口没打穿');
+      else addErrorType(value.errors, '模型方向错');
+    }
+
+    value.recent.push({
+      date: b.md || (r && r.matchDate) || '',
+      match: `${b.h} vs ${b.a}`,
+      pick: `${b.betSide === 'home' ? b.h : b.a} ${b.betSide === 'home' ? b.line : -b.line}`,
+      ev: b.ev,
+      recommendedOdds: b.odds,
+      actualOdds: b.actualOdds || null,
+      score: r && r.status === 'done' ? `${r.hg}-${r.ag}` : 'pending',
+      result: grade.label || 'pending',
+      profit: grade.profit != null ? +grade.profit.toFixed(2) : null
+    });
+  }
+  return {
+    all: finalizeStats(value.all),
+    byEv: finalizeMap(value.byEv),
+    byTime: finalizeMap(value.byTime),
+    byConf: finalizeMap(value.byConf),
+    byLine: finalizeMap(value.byLine),
+    byLeague: finalizeMap(value.byLeague),
+    clv: { ...value.clv, betterLineRate: pct(value.clv.betterLine, value.clv.n, 1), betterOddsRate: pct(value.clv.betterOdds, value.clv.n - value.clv.missingCloseOdds, 1) },
+    missingActualOdds: value.missingActualOdds,
+    errors: value.errors,
+    recent: value.recent.slice(-20)
+  };
+}
 
 function summarizeSellSignals(hist) {
   const done = (hist || []).filter(r => r && r.status === 'done' && r.hg != null && r.ag != null);
@@ -181,35 +302,45 @@ function makeActions(sell) {
   const a = [];
   const go = sell.tiers.go, light = sell.tiers.light, sold = sell.sellOnly;
   if (sold.settled < 50) a.push('卖号样本仍少，先不改核心公式，只观察档位');
-  if (go.settled >= 10 && go.hitRate != null && go.hitRate < 54) a.push('✅可下档命中偏低，先收紧到55%再观察');
+  if (go.settled >= 10 && go.hitRate != null && go.hitRate < 54) a.push('✅可下档命中偏低，先只保留54-56%甜区再观察');
   if (light.settled >= 10 && light.hitRate != null && light.hitRate < 52) a.push('🟡轻仓档偏弱，可考虑降为只展示不卖');
   const deep = sell.byLine['1+'];
   if (deep && deep.settled >= 5 && deep.roi < 0) a.push('大让球继续降权，强队深盘少卖');
-  const sweet = ['52-54', '54-56', '56-58'].map(k => sell.byConf[k]).filter(Boolean).sort((x, y) => (y.roi ?? -999) - (x.roi ?? -999))[0];
-  if (sweet && sweet.settled >= 5) a.push(`当前甜区仍在52-58内部，最优档约命中${sweet.hitRate}% / ROI ${sweet.roi}%`);
+  const sweetRows = ['52-54', '54-56'].map(k => ({ bucket: k, stats: sell.byConf[k] })).filter(x => x.stats);
+  const sweet = sweetRows.sort((x, y) => (y.stats.roi ?? -999) - (x.stats.roi ?? -999))[0];
+  if (sweet && sweet.stats.settled >= 5) a.push(`当前甜区在${sweet.bucket}，约命中${sweet.stats.hitRate}% / ROI ${sweet.stats.roi}%`);
   if (!a.length) a.push('当前卖号规则暂不需要大改，继续积累中午结算样本');
   return a;
 }
 function text(report) {
   const s = report.sell;
+  const m = report.market;
+  const v = report.value;
   return [
     `卖号复盘 ${report.generatedAtBJ}`,
     `胜平负 ${s.oneX2.hitRate ?? '—'}%，号单 ${s.sellOnly.settled}场，命中 ${s.sellOnly.hitRate ?? '—'}%，估算ROI ${s.sellOnly.roi ?? '—'}%`,
+    `让球方向 ${m.ah.all.settled}场 ${m.ah.all.hitRate ?? '—'}%，大小球 ${m.ou.all.settled}场 ${m.ou.all.hitRate ?? '—'}%`,
+    `价值号 ${v.all.settled}注，命中 ${v.all.hitRate ?? '—'}%，ROI ${v.all.roi ?? '—'}%，CLV更好盘口 ${v.clv.betterLineRate ?? '—'}%`,
     `✅可下 ${s.tiers.go.settled}场 ${s.tiers.go.hitRate ?? '—'}%，🟡轻仓 ${s.tiers.light.settled}场 ${s.tiers.light.hitRate ?? '—'}%，🔴观望 ${s.tiers.skip.settled}场`,
     `建议：${report.actions.join('；')}`
   ].join('\n');
 }
 
 (async () => {
-  const hist = await sbGet('fp_hist5');
+  const [hist, valueBetsRaw] = await Promise.all([sbGet('fp_hist5'), sbGet('fp_valueBets')]);
   if (!Array.isArray(hist)) throw new Error('fp_hist5 不是数组，无法复盘');
+  const valueBets = Array.isArray(valueBetsRaw) ? valueBetsRaw : [];
   const sell = summarizeSellSignals(hist);
+  const market = summarizeMarketDirections(hist);
+  const value = summarizeValueBets(valueBets, hist);
   const report = {
-    version: 1,
+    version: 2,
     type: 'sell-signal-review',
     generatedAt: new Date().toISOString(),
     generatedAtBJ: bjNow(),
     sell,
+    market,
+    value,
     weakSpots: weakSpots(sell),
     actions: makeActions(sell)
   };
