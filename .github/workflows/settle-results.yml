@@ -1,0 +1,28 @@
+name: 足球预测·自动结算赛果
+
+on:
+  schedule:
+    # GitHub cron uses UTC. Run every 30 minutes; the page only settles matches confirmed as finished.
+    - cron: '5,35 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  settle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: 取出仓库文件
+        uses: actions/checkout@v4
+      - name: 准备 Node 环境
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 安装无头浏览器
+        run: |
+          npm init -y
+          npm i playwright
+          npx playwright install --with-deps chromium
+      - name: 自动结算已完赛结果
+        run: node settle_results.js
+        env:
+          AF_KEY: ${{ secrets.AF_KEY }}
