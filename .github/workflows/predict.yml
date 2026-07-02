@@ -37,3 +37,10 @@ jobs:
         env:
           BARK_KEY: ${{ secrets.BARK_KEY }}
           # SB_KEY 可不填(脚本内置 publishable)
+
+      - name: 自动结算已完赛赛果
+        if: always()
+        run: node settle_results.js
+        continue-on-error: true
+        env:
+          AF_KEY: ${{ secrets.AF_KEY }}
