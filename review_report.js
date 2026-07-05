@@ -111,6 +111,17 @@ function gradeAh({ side, line, odds = 2, stake = 1 }, r) {
   if (s4 === -0.25) return { label: 'loseHalf', profit: -0.5 * stake, stake };
   return { label: 'lose', profit: -stake, stake };
 }
+function grade1x2({ side, odds = 2, stake = 1 }, r) {
+  if (!r || r.status !== 'done' || r.hg == null || r.ag == null) return { pending: true };
+  const actual = r.hg > r.ag ? 'home' : (r.hg < r.ag ? 'away' : 'draw');
+  return actual === side ? { label: 'win', profit: stake * (odds - 1), stake } : { label: 'lose', profit: -stake, stake };
+}
+function gradeEh({ side, line, odds = 2, stake = 1 }, r) {
+  if (!r || r.status !== 'done' || r.hg == null || r.ag == null) return { pending: true };
+  const adj = (r.hg - r.ag) + (+line || 0);
+  const actual = adj > 0.0001 ? 'home' : (Math.abs(adj) <= 0.0001 ? 'draw' : 'away');
+  return actual === side ? { label: 'win', profit: stake * (odds - 1), stake } : { label: 'lose', profit: -stake, stake };
+}
 function ahOdds(r) {
   if (!r.ahRec) return 2;
   if (r.ahRec.odds != null) return +r.ahRec.odds;
@@ -153,6 +164,11 @@ function closeVersion(r, ko) {
   return beforeKo[beforeKo.length - 1] || versions[versions.length - 1] || r || null;
 }
 function addErrorType(map, key) { map[key] = (map[key] || 0) + 1; }
+function marketLabel(market) {
+  if (market === '1X2') return '胜平负';
+  if (market === 'EH') return '三项让球';
+  return '亚盘';
+}
 
 function summarizeMarketDirections(hist) {
   const done = (hist || []).filter(r => r && r.status === 'done' && r.hg != null && r.ag != null);
@@ -183,22 +199,31 @@ function summarizeMarketDirections(hist) {
 }
 
 function summarizeValueBets(valueBets, hist) {
-  const value = { all: emptyStats(), byEv: {}, byTime: {}, byConf: {}, byLine: {}, byLeague: {}, clv: { n: 0, betterLine: 0, betterOdds: 0, missingCloseOdds: 0 }, missingActualOdds: 0, errors: {}, recent: [] };
+  const value = { all: emptyStats(), byMarket: {}, byEv: {}, byTime: {}, byConf: {}, byLine: {}, byLeague: {}, clv: { n: 0, betterLine: 0, betterOdds: 0, missingCloseOdds: 0 }, missingActualOdds: 0, errors: {}, recent: [] };
   for (const b of valueBets || []) {
     const r = findHistByKey(hist, b.key);
+    const market = b.market || 'AH';
     const odds = +(b.actualOdds || b.odds || 2);
     if (!b.actualOdds) value.missingActualOdds++;
-    const grade = gradeAh({ side: b.betSide, line: b.line, odds, stake: +(b.stake || 1) }, r);
+    const stake = +(b.stake || 1);
+    const grade = market === '1X2'
+      ? grade1x2({ side: b.betSide, odds, stake }, r)
+      : (market === 'EH'
+        ? gradeEh({ side: b.betSide, line: b.line, odds, stake }, r)
+        : gradeAh({ side: b.betSide, line: b.line, odds, stake }, r));
     addGrade(value.all, grade);
+    addGrade(ensure(value.byMarket, marketLabel(market)), grade);
     addGrade(ensure(value.byEv, evBucket(b.ev)), grade);
     addGrade(ensure(value.byTime, timeBucket(b.pushedAt, b.ko)), grade);
-    addGrade(ensure(value.byLine, lineBucket(b.line)), grade);
+    addGrade(ensure(value.byLine, market === '1X2' ? '胜平负' : (market === 'EH' ? `三项让球 ${b.line}` : lineBucket(b.line))), grade);
     addGrade(ensure(value.byLeague, b.lg || (r && r.league) || '其他'), grade);
-    const conf = r && r.ahRec ? (b.betSide === 'home' ? +r.ahRec.cover : +r.ahRec.lose) : null;
+    const conf = market === '1X2' && r
+      ? (b.betSide === 'home' ? +r.predHW : (b.betSide === 'draw' ? +r.predD : +r.predAW))
+      : (market === 'EH' && b.p != null ? +b.p * 100 : (r && r.ahRec ? (b.betSide === 'home' ? +r.ahRec.cover : +r.ahRec.lose) : null));
     addGrade(ensure(value.byConf, confBucket(conf)), grade);
 
     const closeSnap = b.closeSnapshot || (Array.isArray(b.snapshots) ? b.snapshots[b.snapshots.length - 1] : null);
-    if (closeSnap && closeSnap.ahLine != null) {
+    if (market === 'AH' && closeSnap && closeSnap.ahLine != null) {
       value.clv.n++;
       const recSideLine = b.betSide === 'home' ? +b.line : -b.line;
       const closeSideLine = b.betSide === 'home' ? +closeSnap.ahLine : -closeSnap.ahLine;
@@ -207,7 +232,7 @@ function summarizeValueBets(valueBets, hist) {
       if (closeOdds != null) {
         if (+b.odds > +closeOdds + 0.001) value.clv.betterOdds++;
       } else value.clv.missingCloseOdds++;
-    } else {
+    } else if (market === 'AH') {
       const cv = closeVersion(r, b.ko);
       if (cv && cv.ahRec && cv.ahRec.line != null) {
         value.clv.n++;
@@ -221,17 +246,28 @@ function summarizeValueBets(valueBets, hist) {
     }
 
     if (r && r.status === 'done' && grade.label && !['win', 'winHalf', 'push'].includes(grade.label)) {
-      const sideDiff = b.betSide === 'home' ? r.hg - r.ag : r.ag - r.hg;
-      if (Math.abs(+b.line) >= 1) addErrorType(value.errors, '强队大热盘失真/深盘没穿');
-      else if (/冰岛超|巴乙/.test(b.lg || r.league || '')) addErrorType(value.errors, '冷门联赛数据质量差');
-      else if (sideDiff > 0) addErrorType(value.errors, '模型看对方向但盘口没打穿');
-      else addErrorType(value.errors, '模型方向错');
+      if (market === '1X2') {
+        addErrorType(value.errors, '胜平负方向错/平局风险低估');
+      } else if (market === 'EH') {
+        addErrorType(value.errors, '三项让球方向错/让平风险误判');
+      } else {
+        const sideDiff = b.betSide === 'home' ? r.hg - r.ag : r.ag - r.hg;
+        if (Math.abs(+b.line) >= 1) addErrorType(value.errors, '强队大热盘失真/深盘没穿');
+        else if (/冰岛超|巴乙/.test(b.lg || r.league || '')) addErrorType(value.errors, '冷门联赛数据质量差');
+        else if (sideDiff > 0) addErrorType(value.errors, '模型看对方向但盘口没打穿');
+        else addErrorType(value.errors, '模型方向错');
+      }
     }
 
     value.recent.push({
       date: b.md || (r && r.matchDate) || '',
       match: `${b.h} vs ${b.a}`,
-      pick: `${b.betSide === 'home' ? b.h : b.a} ${b.betSide === 'home' ? b.line : -b.line}`,
+      market,
+      pick: market === '1X2'
+        ? (b.side || (b.betSide === 'home' ? b.h : (b.betSide === 'away' ? b.a : '平局')))
+        : (market === 'EH'
+          ? `${b.side || (b.betSide === 'home' ? b.h : (b.betSide === 'away' ? b.a : '让平'))}(${b.line})`
+          : `${b.betSide === 'home' ? b.h : b.a} ${b.betSide === 'home' ? b.line : -b.line}`),
       ev: b.ev,
       recommendedOdds: b.odds,
       actualOdds: b.actualOdds || null,
@@ -242,6 +278,7 @@ function summarizeValueBets(valueBets, hist) {
   }
   return {
     all: finalizeStats(value.all),
+    byMarket: finalizeMap(value.byMarket),
     byEv: finalizeMap(value.byEv),
     byTime: finalizeMap(value.byTime),
     byConf: finalizeMap(value.byConf),
