@@ -13,6 +13,10 @@ const EV_MIN = 0.08, STAKE = 50, STAKE_HI = 75, EV_HI = 0.12, DAILY_CAP = 8, MAT
 const ENABLE_AH_PUSH = process.env.ENABLE_AH_PUSH !== '0';
 const ENABLE_1X2_PUSH = process.env.ENABLE_1X2_PUSH === '1';
 const ENABLE_EH_PUSH = process.env.ENABLE_EH_PUSH === '1';
+// 观察盘采样:胜平负/三项让球只【记录到 fp_watchBets】不推送不下注,积累真实样本供日后评估是否转正。
+// 与推送互不影响:不占每日8注额度、不写 fp_valueBets、不发 Bark。
+const ENABLE_WATCH_RECORD = process.env.ENABLE_WATCH_RECORD !== '0';
+const WATCH_CAP = 500; // fp_watchBets 最多保留最近500条,防无限膨胀
 
 if (!BARK && !DRY) { console.error('缺 BARK_KEY'); process.exit(1); }
 
@@ -134,7 +138,7 @@ function pickLine(c) {
 (async () => {
   const now = Date.now(), bj = bjParts();
   if (!inWindow(bj.hour) && !DRY) { console.log(`当前北京 ${bj.hour}:xx 非推送窗(12:00-05:00),跳过`); return; }
-  const [hist, fd, st, vbRaw] = await Promise.all([sbGet('fp_hist5'), sbGet('fp_fetchData'), sbGet('fp_pushState'), sbGet('fp_valueBets')]);
+  const [hist, fd, st, vbRaw, wbRaw] = await Promise.all([sbGet('fp_hist5'), sbGet('fp_fetchData'), sbGet('fp_pushState'), sbGet('fp_valueBets'), sbGet('fp_watchBets')]);
   if (!hist) { console.error('读不到 fp_hist5'); process.exit(1); }
   const fetchData = fd || {};
   const bday = bettingDay();
@@ -184,5 +188,35 @@ function pickLine(c) {
     }
   }
   if (!DRY && sent > 0) { await sbSet('fp_pushState', state); await sbSet('fp_valueBets', valueBets); }
-  console.log(`完成 · 候选 ${cands.length} · 本轮推送 ${sent} · 今日累计 ${todayCount}/${DAILY_CAP} · 投注日 ${bday}${DRY ? ' (DRY-RUN,未真推/未写云)' : ''}`);
+
+  // ── 观察盘采样(1X2/EH):同样的成熟盘窗口(≤4h),EV≥门槛就记快照;同场同市场只记一次 ──
+  let watchNew = 0;
+  if (ENABLE_WATCH_RECORD) {
+    const watchBets = Array.isArray(wbRaw) ? wbRaw : [];
+    const wbSet = new Set(watchBets.map(b => b.key));
+    for (const r of hist) {
+      if (!r || r.status !== 'pending') continue;
+      const ko = koMs(r.matchDate, r.matchTime); if (ko == null || ko <= now) continue;
+      if ((ko - now) / 3600e3 > MATURE_H) continue;
+      const fdo = fetchData[`${r.h} vs ${r.a}`]; if (!fdo) continue;
+      for (const pick of [valueOneX2(r, fdo), valueEuropeanHandicap(r, fdo)]) {
+        if (!pick || pick.ev < EV_MIN) continue;
+        const wkey = `${r.h}|${r.a}|${r.matchDate || ''}|${pick.market}`;
+        if (wbSet.has(wkey)) continue;
+        watchBets.push({
+          key: wkey, lg: r.league || '', h: r.h, a: r.a, md: r.matchDate || '',
+          market: pick.market, marketName: pick.marketName, betSide: pick.betSide, side: pick.side,
+          line: pick.line == null ? null : pick.line, sline: pick.sline == null ? null : pick.sline,
+          odds: pick.odds, ev: +pick.ev.toFixed(3), prob: +pick.p.toFixed(3),
+          edge: pick.edge == null ? null : +pick.edge.toFixed(3),
+          ko, recordedAt: Date.now(), watch: true
+        });
+        wbSet.add(wkey); watchNew++;
+        if (DRY) console.log('[DRY] 观察记录 →', pick.marketName, `[${r.league || ''}] ${r.h} vs ${r.a}`, pick.side, pick.line != null ? `(${fmtLine(pick.line)})` : '', `@${pick.odds.toFixed(2)} EV+${(pick.ev * 100).toFixed(1)}%`);
+      }
+    }
+    if (watchBets.length > WATCH_CAP) watchBets.splice(0, watchBets.length - WATCH_CAP);
+    if (watchNew > 0 && !DRY) await sbSet('fp_watchBets', watchBets);
+  }
+  console.log(`完成 · 候选 ${cands.length} · 本轮推送 ${sent} · 今日累计 ${todayCount}/${DAILY_CAP} · 观察新记 ${watchNew} · 投注日 ${bday}${DRY ? ' (DRY-RUN,未真推/未写云)' : ''}`);
 })().catch(e => { console.error(e); process.exit(1); });
