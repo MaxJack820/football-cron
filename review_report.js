@@ -201,7 +201,8 @@ function summarizeMarketDirections(hist) {
 function summarizeValueBets(valueBets, hist) {
   const value = { all: emptyStats(), byMarket: {}, byEv: {}, byTime: {}, byConf: {}, byLine: {}, byLeague: {}, clv: { n: 0, betterLine: 0, betterOdds: 0, missingCloseOdds: 0 }, missingActualOdds: 0, errors: {}, recent: [] };
   for (const b of valueBets || []) {
-    const r = findHistByKey(hist, b.key);
+    // 用字段拼 key 匹配历史(不用 b.key):观察注的 key 带"|市场"后缀,直接比对会永远匹配不上
+    const r = findHistByKey(hist, `${b.h}|${b.a}|${b.md || ''}`);
     const market = b.market || 'AH';
     const odds = +(b.actualOdds || b.odds || 2);
     if (!b.actualOdds) value.missingActualOdds++;
@@ -370,26 +371,30 @@ function text(report) {
     `胜平负 ${s.oneX2.hitRate ?? '—'}%，号单 ${s.sellOnly.settled}场，命中 ${s.sellOnly.hitRate ?? '—'}%，估算ROI ${s.sellOnly.roi ?? '—'}%`,
     `让球方向 ${m.ah.all.settled}场 ${m.ah.all.hitRate ?? '—'}%，大小球 ${m.ou.all.settled}场 ${m.ou.all.hitRate ?? '—'}%`,
     `价值号 ${v.all.settled}注，命中 ${v.all.hitRate ?? '—'}%，ROI ${v.all.roi ?? '—'}%，CLV更好盘口 ${v.clv.betterLineRate ?? '—'}%`,
+    `观察盘(未下注) ${(report.watch && report.watch.all.settled) || 0}注，命中 ${(report.watch && report.watch.all.hitRate) ?? '—'}%，ROI ${(report.watch && report.watch.all.roi) ?? '—'}%`,
     `✅可下 ${s.tiers.go.settled}场 ${s.tiers.go.hitRate ?? '—'}%，🟡轻仓 ${s.tiers.light.settled}场 ${s.tiers.light.hitRate ?? '—'}%，🔴观望 ${s.tiers.skip.settled}场`,
     `建议：${report.actions.join('；')}`
   ].join('\n');
 }
 
 (async () => {
-  const [hist, valueBetsRaw] = await Promise.all([sbGet('fp_hist5'), sbGet('fp_valueBets')]);
+  const [hist, valueBetsRaw, watchBetsRaw] = await Promise.all([sbGet('fp_hist5'), sbGet('fp_valueBets'), sbGet('fp_watchBets')]);
   if (!Array.isArray(hist)) throw new Error('fp_hist5 不是数组，无法复盘');
   const valueBets = Array.isArray(valueBetsRaw) ? valueBetsRaw : [];
+  const watchBets = Array.isArray(watchBetsRaw) ? watchBetsRaw : [];
   const sell = summarizeSellSignals(hist);
   const market = summarizeMarketDirections(hist);
   const value = summarizeValueBets(valueBets, hist);
+  const watch = summarizeValueBets(watchBets, hist); // 观察盘(1X2/EH,未下注)复用同一套结算/分组逻辑,平注1单位口径
   const report = {
-    version: 2,
+    version: 3,
     type: 'sell-signal-review',
     generatedAt: new Date().toISOString(),
     generatedAtBJ: bjNow(),
     sell,
     market,
     value,
+    watch,
     weakSpots: weakSpots(sell),
     actions: makeActions(sell)
   };
