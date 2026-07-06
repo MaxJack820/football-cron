@@ -17,6 +17,13 @@ const ENABLE_EH_PUSH = process.env.ENABLE_EH_PUSH === '1';
 // 与推送互不影响:不占每日8注额度、不写 fp_valueBets、不发 Bark。
 const ENABLE_WATCH_RECORD = process.env.ENABLE_WATCH_RECORD !== '0';
 const WATCH_CAP = 500; // fp_watchBets 最多保留最近500条,防无限膨胀
+// 实验A:首发核验(只记录不行动)。已推的注在 KO 前75分钟内(官方首发一般 T-60~T-40 公布)复核一次,
+// 记录"若有首发复核,这注会被否决还是维持"(fp_lineupChecks)。跑50-100注后在日报对比两组真实ROI,
+// 显著更差→再上线真实否决;否则证伪,不加复杂度。
+// 数据源=fp_fetchData(后端页面每15分钟刷新,自带 homeStarters/awayStarters/_lineupOut/keyPlayers),零API调用。
+const ENABLE_LINEUP_CHECK = process.env.ENABLE_LINEUP_CHECK !== '0';
+const LINEUP_WINDOW_MIN = 75;   // KO 前 ≤75 分钟才复核(再早首发没公布)
+const VETO_LINE_MOVE = 0.25;    // 盘口向我方不利方向移动 ≥0.25 → 虚拟否决
 
 if (!BARK && !DRY) { console.error('缺 BARK_KEY'); process.exit(1); }
 
@@ -50,6 +57,51 @@ const validOdds = x => Number.isFinite(+x) && +x > 1.05;
 async function bark(title, body) {
   const u = `${BARK_SERVER}/${BARK}/${encodeURIComponent(title)}/${encodeURIComponent(body)}?group=${encodeURIComponent('价值号')}&sound=bell`;
   const r = await fetch(u); return r.ok;
+}
+
+// ── 实验A 辅助:从 fp_fetchData 现成数据做首发/盘口复核(零API调用)──
+const _nrm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+const _lastTok = s => { const t = _nrm(s).split(/\s+/); return t[t.length - 1] || ''; };
+// 返回:核验记录对象;null=首发还没公布,下轮重试
+function lineupCheck(b, fetchData, now) {
+  const fdo = fetchData[`${b.h} vs ${b.a}`];
+  if (!fdo) return { key: b.key, ok: false, reason: 'no-fetchdata' };
+  const started = fdo._lineupOut && Array.isArray(fdo.homeStarters) && Array.isArray(fdo.awayStarters)
+    && fdo.homeStarters.length >= 7 && fdo.awayStarters.length >= 7;
+  if (!started) {
+    if (b.ko - now <= 10 * 60e3) return { key: b.key, ok: false, reason: 'lineup-not-published' };
+    return null; // 还早,下轮重试
+  }
+  // 信号1:下注侧头号射手是否缺席首发(keyPlayers 名格式 "T. Heintz",首发全名 → 按姓氏匹配)
+  const sideStarters = b.betSide === 'home' ? fdo.homeStarters : (b.betSide === 'away' ? fdo.awayStarters : null);
+  const kp = b.betSide === 'home' ? fdo.homeKeyPlayers : (b.betSide === 'away' ? fdo.awayKeyPlayers : null);
+  const topScorer = (kp && kp.scorers && kp.scorers[0] && kp.scorers[0].name) || null;
+  let starOut = null;
+  if (topScorer && sideStarters && sideStarters.length) {
+    const ln = _lastTok(topScorer);
+    starOut = ln ? !sideStarters.some(p => _lastTok(p && p.name) === ln) : null;
+  }
+  // 信号2:盘口是否向我方不利方向移动(正数=不利)。fetchData 每15分钟刷新,oddsTs 供分析判新鲜度。
+  const curLine = fdo.ahLine != null ? +fdo.ahLine : null;
+  let againstDelta = null;
+  if ((b.market || 'AH') === 'AH' && b.line != null && curLine != null) {
+    againstDelta = b.betSide === 'home' ? +(curLine - b.line).toFixed(2) : +(b.line - curLine).toFixed(2);
+  }
+  const vetoStar = starOut === true;
+  const vetoLine = againstDelta != null && againstDelta >= VETO_LINE_MOVE;
+  return {
+    key: b.key, ok: true, market: b.market || 'AH', betSide: b.betSide,
+    minToKo: Math.round((b.ko - now) / 60e3),
+    formationH: fdo.homeFormation || null, formationA: fdo.awayFormation || null,
+    topScorer, starOut,
+    injuredBetSide: b.betSide === 'home' ? (fdo.homeInjured ?? null) : (b.betSide === 'away' ? (fdo.awayInjured ?? null) : null),
+    recLine: b.line == null ? null : +b.line, curLine, againstDelta,
+    curOddsHome: fdo.ahOddsHome != null ? +fdo.ahOddsHome : null,
+    curOddsAway: fdo.ahOddsAway != null ? +fdo.ahOddsAway : null,
+    oddsTs: fdo._afTs || null,
+    verdict: (vetoStar || vetoLine) ? 'veto' : 'keep',
+    vetoReason: vetoStar ? `头号射手${topScorer}缺阵首发` : (vetoLine ? `盘口反向+${againstDelta}` : null)
+  };
 }
 
 function marketEdge(prob, allOdds, idx) {
@@ -134,6 +186,42 @@ function pickLine(c) {
   if (c.market === 'EH') return `${c.side}${c.betSide === 'draw' ? '' : ''} (${fmtLine(c.line)}) @${c.odds.toFixed(2)}`;
   return `${c.side} @${c.odds.toFixed(2)}`;
 }
+function snapshotForBet(b, fetchData, now = Date.now()) {
+  const fdo = fetchData[`${b.h} vs ${b.a}`];
+  if (!fdo) return null;
+  return {
+    ts: now,
+    afTs: fdo._afTs || null,
+    ahLine: fdo.ahLine == null ? null : +fdo.ahLine,
+    ahOddsHome: fdo.ahOddsHome == null ? null : +fdo.ahOddsHome,
+    ahOddsAway: fdo.ahOddsAway == null ? null : +fdo.ahOddsAway,
+    oddsHome: fdo.oddsHome == null ? null : +fdo.oddsHome,
+    oddsDraw: fdo.oddsDraw == null ? null : +fdo.oddsDraw,
+    oddsAway: fdo.oddsAway == null ? null : +fdo.oddsAway,
+    ehLine: fdo.ehLine == null ? null : +fdo.ehLine,
+    ehOddsHome: fdo.ehOddsHome == null ? null : +fdo.ehOddsHome,
+    ehOddsDraw: fdo.ehOddsDraw == null ? null : +fdo.ehOddsDraw,
+    ehOddsAway: fdo.ehOddsAway == null ? null : +fdo.ehOddsAway
+  };
+}
+function appendSnapshot(b, snap) {
+  if (!snap) return false;
+  const shots = Array.isArray(b.snapshots) ? b.snapshots : [];
+  const last = shots[shots.length - 1];
+  const moved = !last
+    || last.ahLine !== snap.ahLine
+    || last.ahOddsHome !== snap.ahOddsHome
+    || last.ahOddsAway !== snap.ahOddsAway
+    || last.oddsHome !== snap.oddsHome
+    || last.oddsDraw !== snap.oddsDraw
+    || last.oddsAway !== snap.oddsAway
+    || (snap.ts - (last.ts || 0)) >= 30 * 60e3;
+  if (!moved) return false;
+  shots.push(snap);
+  if (shots.length > 12) shots.splice(0, shots.length - 12);
+  b.snapshots = shots;
+  return true;
+}
 
 (async () => {
   const now = Date.now(), bj = bjParts();
@@ -147,6 +235,7 @@ function pickLine(c) {
   let todayCount = state.pushed.length;
   const valueBets = Array.isArray(vbRaw) ? vbRaw : [];          // 实盘推送战绩:推过的号(成功才记),结算后在价值页统计真ROI
   const vbSet = new Set(valueBets.map(b => b.key));
+  let valueBetsDirty = false;
 
   const cands = [];
   for (const r of hist) {
@@ -182,12 +271,27 @@ function pickLine(c) {
         market: c.market, marketName: c.marketName, betSide: c.betSide, side: c.side,
         line: c.line, sline: c.sline, odds: c.odds, ev: +c.ev.toFixed(3),
         prob: +c.p.toFixed(3), edge: c.edge == null ? null : +c.edge.toFixed(3),
-        stake: c.stake, ko: c.ko, pushedAt: Date.now()
+        stake: c.stake, ko: c.ko, pushedAt: Date.now(),
+        snapshots: [snapshotForBet(c, fetchData, Date.now())].filter(Boolean)
       });
+      valueBetsDirty = true;
       vbSet.add(c.key);
     }
   }
-  if (!DRY && sent > 0) { await sbSet('fp_pushState', state); await sbSet('fp_valueBets', valueBets); }
+
+  // 已推实盘号的盘口快照:每轮保存变线/变水,KO 前约20分钟内的最后一次作为 closeSnapshot。
+  for (const b of valueBets) {
+    if (!b || !b.ko || b.ko <= now || b.ko - now > MATURE_H * 3600e3) continue;
+    const snap = snapshotForBet(b, fetchData, now);
+    if (appendSnapshot(b, snap)) valueBetsDirty = true;
+    if (snap && b.ko - now <= 20 * 60e3) {
+      b.closeSnapshot = snap;
+      valueBetsDirty = true;
+    }
+  }
+
+  if (!DRY && sent > 0) await sbSet('fp_pushState', state);
+  if (!DRY && valueBetsDirty) await sbSet('fp_valueBets', valueBets);
 
   // ── 观察盘采样(1X2/EH):同样的成熟盘窗口(≤4h),EV≥门槛就记快照;同场同市场只记一次 ──
   let watchNew = 0;
@@ -218,5 +322,27 @@ function pickLine(c) {
     if (watchBets.length > WATCH_CAP) watchBets.splice(0, watchBets.length - WATCH_CAP);
     if (watchNew > 0 && !DRY) await sbSet('fp_watchBets', watchBets);
   }
-  console.log(`完成 · 候选 ${cands.length} · 本轮推送 ${sent} · 今日累计 ${todayCount}/${DAILY_CAP} · 观察新记 ${watchNew} · 投注日 ${bday}${DRY ? ' (DRY-RUN,未真推/未写云)' : ''}`);
+
+  // ── 实验A:首发核验(只记录不行动;数据全部来自 fp_fetchData,零API调用)──
+  let lineupChecked = 0;
+  if (ENABLE_LINEUP_CHECK) {
+    try {
+      const lcRaw = await sbGet('fp_lineupChecks');
+      const checks = Array.isArray(lcRaw) ? lcRaw : [];
+      const checkedSet = new Set(checks.map(c => c && c.key));
+      const due = valueBets.filter(b => b && b.ko && !checkedSet.has(b.key) && b.ko > now && (b.ko - now) <= LINEUP_WINDOW_MIN * 60e3);
+      for (const b of due) {
+        let c;
+        try { c = lineupCheck(b, fetchData, now); }
+        catch (e) { c = { key: b.key, ok: false, reason: 'error:' + String(e.message || e).slice(0, 80) }; }
+        if (c === null) continue; // 首发未公布,下轮重试
+        c.checkedAt = now;
+        checks.push(c); checkedSet.add(b.key); lineupChecked++;
+        console.log(`${DRY ? '[DRY] ' : ''}首发核验 → ${b.h} vs ${b.a} · ${c.ok ? `${c.verdict === 'veto' ? '🚫虚拟否决(' + c.vetoReason + ')' : '✅维持'} · 射手缺阵:${c.starOut == null ? '?' : c.starOut} · 盘口Δ${c.againstDelta ?? '?'}` : '未核验(' + c.reason + ')'}`);
+      }
+      if (checks.length > 300) checks.splice(0, checks.length - 300);
+      if (lineupChecked > 0 && !DRY) await sbSet('fp_lineupChecks', checks);
+    } catch (e) { console.log('首发核验跳过:', String(e.message || e).slice(0, 120)); }
+  }
+  console.log(`完成 · 候选 ${cands.length} · 本轮推送 ${sent} · 今日累计 ${todayCount}/${DAILY_CAP} · 观察新记 ${watchNew} · 首发核验 ${lineupChecked} · 投注日 ${bday}${DRY ? ' (DRY-RUN,未真推/未写云)' : ''}`);
 })().catch(e => { console.error(e); process.exit(1); });
