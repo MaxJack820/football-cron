@@ -10,7 +10,7 @@ on:
 
 jobs:
   predict:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
       - name: 取出仓库文件
