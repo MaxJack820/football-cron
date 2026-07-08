@@ -8,7 +8,7 @@ on:
 
 jobs:
   settle:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 12
     steps:
       - name: 取出仓库文件
