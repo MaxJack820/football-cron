@@ -180,11 +180,31 @@ function bestMarket(r, fdo) {
   picks.sort((a, b) => b.ev - a.ev);
   return picks[0];
 }
+function followProfile(c, now = Date.now()) {
+  const tags = [];
+  if ((c.market || 'AH') === 'AH') {
+    if (!(+c.p >= 0.55)) tags.push('低概率<55%');
+    if (Math.abs(+c.line || 0) >= 1) tags.push('深盘>=1');
+  }
+  if (/世界杯/.test(c.lg || '')) tags.push('世界杯样本风险');
+  if (c.ko && (c.ko - now) / 3600e3 < 1) tags.push('临场<1h');
+  return {
+    follow: tags.length ? 'watch' : 'follow',
+    followText: tags.length ? '⚠️暂不跟·只记录' : '✅建议小注跟',
+    riskTags: tags
+  };
+}
 function pickLine(c) {
   if (c.market === 'AH') return `${c.side} ${fmtLine(c.sline)} @${c.odds.toFixed(2)}`;
   if (c.market === '1X2') return `${c.side} @${c.odds.toFixed(2)}`;
-  if (c.market === 'EH') return `${c.side}${c.betSide === 'draw' ? '' : ''} (${fmtLine(c.line)}) @${c.odds.toFixed(2)}`;
+  if (c.market === 'EH') return `${ehPickText(c)} @${c.odds.toFixed(2)}`;
   return `${c.side} @${c.odds.toFixed(2)}`;
+}
+function ehPickText(c) {
+  const line = +c.line || 0;
+  if (c.betSide === 'home') return `${c.h || c.side || '主队'} ${fmtLine(line)}`;
+  if (c.betSide === 'away') return `${c.a || c.side || '客队'} ${fmtLine(-line)}`;
+  return `让平(${c.h || '主队'} ${fmtLine(line)})`;
 }
 function snapshotForBet(b, fetchData, now = Date.now()) {
   const fdo = fetchData[`${b.h} vs ${b.a}`];
@@ -254,13 +274,15 @@ function appendSnapshot(b, snap) {
       stake: pick.ev >= EV_HI ? STAKE_HI : STAKE
     });
   }
+  cands.forEach(c => Object.assign(c, followProfile(c, now)));
   cands.sort((a, b) => b.ev - a.ev);
 
   let sent = 0;
   for (const c of cands) {
     if (todayCount >= DAILY_CAP) { console.log('已达每日上限', DAILY_CAP); break; }
-    const title = `⚽价值号 EV+${(c.ev * 100).toFixed(0)}% · ${c.marketName} · 注${c.stake}`;
-    const body = `[${c.lg}] ${c.h} vs ${c.a}\n${pickLine(c)}\n模型${(c.p * 100).toFixed(1)}% · EV+${(c.ev * 100).toFixed(1)}%\n今日第 ${todayCount + 1}/${DAILY_CAP} 注`;
+    const title = `⚽价值号 EV+${(c.ev * 100).toFixed(0)}% · ${c.followText} · ${c.marketName}`;
+    const risk = c.riskTags && c.riskTags.length ? `\n风险:${c.riskTags.join('、')}` : '';
+    const body = `[${c.lg}] ${c.h} vs ${c.a}\n${pickLine(c)}\n模型${(c.p * 100).toFixed(1)}% · EV+${(c.ev * 100).toFixed(1)} · 建议:${c.followText}${risk}\n今日第 ${todayCount + 1}/${DAILY_CAP} 注 · 系统记录注${c.stake}`;
     if (DRY) { console.log('[DRY] 推送 →', title, '|', body.replace(/\n/g, ' / ')); todayCount++; sent++; continue; }
     const ok = await bark(title, body);
     if (!ok) { console.log('⚠️ Bark失败,本场下轮重试:', c.h, 'vs', c.a); continue; }
@@ -271,6 +293,7 @@ function appendSnapshot(b, snap) {
         market: c.market, marketName: c.marketName, betSide: c.betSide, side: c.side,
         line: c.line, sline: c.sline, odds: c.odds, ev: +c.ev.toFixed(3),
         prob: +c.p.toFixed(3), edge: c.edge == null ? null : +c.edge.toFixed(3),
+        follow: c.follow, followText: c.followText, riskTags: c.riskTags || [],
         stake: c.stake, ko: c.ko, pushedAt: Date.now(),
         snapshots: [snapshotForBet(c, fetchData, Date.now())].filter(Boolean)
       });
