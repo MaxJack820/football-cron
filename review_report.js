@@ -199,7 +199,7 @@ function summarizeMarketDirections(hist) {
 }
 
 function summarizeValueBets(valueBets, hist) {
-  const value = { all: emptyStats(), byMarket: {}, byEv: {}, byTime: {}, byConf: {}, byLine: {}, byLeague: {}, clv: { n: 0, betterLine: 0, betterOdds: 0, missingCloseOdds: 0 }, missingActualOdds: 0, errors: {}, recent: [] };
+  const value = { all: emptyStats(), byMarket: {}, byEv: {}, byTime: {}, byConf: {}, byLine: {}, byLeague: {}, byClv: {}, clv: { n: 0, betterLine: 0, betterOdds: 0, missingCloseOdds: 0 }, missingActualOdds: 0, errors: {}, recent: [] };
   for (const b of valueBets || []) {
     // 用字段拼 key 匹配历史(不用 b.key):观察注的 key 带"|市场"后缀,直接比对会永远匹配不上
     const r = findHistByKey(hist, `${b.h}|${b.a}|${b.md || ''}`);
@@ -223,12 +223,15 @@ function summarizeValueBets(valueBets, hist) {
       : (market === 'EH' && b.p != null ? +b.p * 100 : (r && r.ahRec ? (b.betSide === 'home' ? +r.ahRec.cover : +r.ahRec.lose) : null));
     addGrade(ensure(value.byConf, confBucket(conf)), grade);
 
+    // CLV:比较"我们记录时拿到的线"和收盘线;并按移动方向分组统计 ROI(实验B:盘口反向移动的注是否更差)
+    let clvBucket = '无收盘数据';
     const closeSnap = b.closeSnapshot || (Array.isArray(b.snapshots) ? b.snapshots[b.snapshots.length - 1] : null);
     if (market === 'AH' && closeSnap && closeSnap.ahLine != null) {
       value.clv.n++;
       const recSideLine = b.betSide === 'home' ? +b.line : -b.line;
       const closeSideLine = b.betSide === 'home' ? +closeSnap.ahLine : -closeSnap.ahLine;
       if (recSideLine > closeSideLine + 0.001) value.clv.betterLine++;
+      clvBucket = recSideLine > closeSideLine + 0.001 ? '拿到更好线' : (recSideLine < closeSideLine - 0.001 ? '盘口反向(更差线)' : '线持平');
       const closeOdds = b.betSide === 'home' ? closeSnap.ahOddsHome : closeSnap.ahOddsAway;
       if (closeOdds != null) {
         if (+b.odds > +closeOdds + 0.001) value.clv.betterOdds++;
@@ -240,11 +243,13 @@ function summarizeValueBets(valueBets, hist) {
         const recSideLine = b.betSide === 'home' ? +b.line : -b.line;
         const closeSideLine = b.betSide === 'home' ? +cv.ahRec.line : -cv.ahRec.line;
         if (recSideLine > closeSideLine + 0.001) value.clv.betterLine++;
+        clvBucket = recSideLine > closeSideLine + 0.001 ? '拿到更好线' : (recSideLine < closeSideLine - 0.001 ? '盘口反向(更差线)' : '线持平');
         if (cv.ahRec.side === b.betSide && cv.ahRec.odds != null) {
           if (+b.odds > +cv.ahRec.odds + 0.001) value.clv.betterOdds++;
         } else value.clv.missingCloseOdds++;
       }
     }
+    if (market === 'AH') addGrade(ensure(value.byClv, clvBucket), grade);
 
     if (r && r.status === 'done' && grade.label && !['win', 'winHalf', 'push'].includes(grade.label)) {
       if (market === '1X2') {
@@ -285,11 +290,39 @@ function summarizeValueBets(valueBets, hist) {
     byConf: finalizeMap(value.byConf),
     byLine: finalizeMap(value.byLine),
     byLeague: finalizeMap(value.byLeague),
+    byClv: finalizeMap(value.byClv),
     clv: { ...value.clv, betterLineRate: pct(value.clv.betterLine, value.clv.n, 1), betterOddsRate: pct(value.clv.betterOdds, value.clv.n - value.clv.missingCloseOdds, 1) },
     missingActualOdds: value.missingActualOdds,
     errors: value.errors,
     recent: value.recent.slice(-20)
   };
+}
+
+// 实验A汇总:首发核验的"虚拟否决组 vs 维持组"真实ROI对比(fp_lineupChecks × fp_valueBets × 赛果)
+function summarizeLineupChecks(checks, valueBets, hist) {
+  const byKey = {}; (valueBets || []).forEach(b => { if (b) byKey[b.key] = b; });
+  const out = { recorded: (checks || []).length, checked: 0, noLineup: 0, pendingResult: 0, veto: emptyStats(), keep: emptyStats(), recent: [] };
+  for (const c of checks || []) {
+    if (!c) continue;
+    if (!c.ok) { out.noLineup++; continue; }
+    const b = byKey[c.key]; if (!b) continue;
+    out.checked++;
+    const r = findHistByKey(hist, `${b.h}|${b.a}|${b.md || ''}`);
+    const odds = +(b.actualOdds || b.odds || 2), stake = +(b.stake || 1);
+    const market = b.market || 'AH';
+    const grade = market === '1X2'
+      ? grade1x2({ side: b.betSide, odds, stake }, r)
+      : (market === 'EH'
+        ? gradeEh({ side: b.betSide, line: b.line, odds, stake }, r)
+        : gradeAh({ side: b.betSide, line: b.line, odds, stake }, r));
+    if (grade.pending) out.pendingResult++;
+    addGrade(c.verdict === 'veto' ? out.veto : out.keep, grade);
+    out.recent.push({ match: `${b.h} vs ${b.a}`, verdict: c.verdict, reason: c.vetoReason || '', starOut: c.starOut ?? null, dLine: c.againstDelta ?? null, result: grade.label || 'pending' });
+  }
+  out.veto = finalizeStats(out.veto);
+  out.keep = finalizeStats(out.keep);
+  out.recent = out.recent.slice(-15);
+  return out;
 }
 
 function summarizeSellSignals(hist) {
@@ -372,16 +405,18 @@ function text(report) {
     `让球方向 ${m.ah.all.settled}场 ${m.ah.all.hitRate ?? '—'}%，大小球 ${m.ou.all.settled}场 ${m.ou.all.hitRate ?? '—'}%`,
     `价值号 ${v.all.settled}注，命中 ${v.all.hitRate ?? '—'}%，ROI ${v.all.roi ?? '—'}%，CLV更好盘口 ${v.clv.betterLineRate ?? '—'}%`,
     `观察盘(未下注) ${(report.watch && report.watch.all.settled) || 0}注，命中 ${(report.watch && report.watch.all.hitRate) ?? '—'}%，ROI ${(report.watch && report.watch.all.roi) ?? '—'}%`,
+    (e => e && e.checked ? `首发实验：否决 ${e.veto.settled}注ROI ${e.veto.roi ?? '—'}% vs 维持 ${e.keep.settled}注ROI ${e.keep.roi ?? '—'}%` : '首发实验：暂无核验样本')(report.experiments && report.experiments.lineupCheck),
     `✅可下 ${s.tiers.go.settled}场 ${s.tiers.go.hitRate ?? '—'}%，🟡轻仓 ${s.tiers.light.settled}场 ${s.tiers.light.hitRate ?? '—'}%，🔴观望 ${s.tiers.skip.settled}场`,
     `建议：${report.actions.join('；')}`
   ].join('\n');
 }
 
 (async () => {
-  const [hist, valueBetsRaw, watchBetsRaw] = await Promise.all([sbGet('fp_hist5'), sbGet('fp_valueBets'), sbGet('fp_watchBets')]);
+  const [hist, valueBetsRaw, watchBetsRaw, lineupChecksRaw] = await Promise.all([sbGet('fp_hist5'), sbGet('fp_valueBets'), sbGet('fp_watchBets'), sbGet('fp_lineupChecks')]);
   if (!Array.isArray(hist)) throw new Error('fp_hist5 不是数组，无法复盘');
   const valueBets = Array.isArray(valueBetsRaw) ? valueBetsRaw : [];
   const watchBets = Array.isArray(watchBetsRaw) ? watchBetsRaw : [];
+  const lineupChecks = Array.isArray(lineupChecksRaw) ? lineupChecksRaw : [];
   const sell = summarizeSellSignals(hist);
   const market = summarizeMarketDirections(hist);
   const value = summarizeValueBets(valueBets, hist);
@@ -395,6 +430,7 @@ function text(report) {
     market,
     value,
     watch,
+    experiments: { lineupCheck: summarizeLineupChecks(lineupChecks, valueBets, hist) },
     weakSpots: weakSpots(sell),
     actions: makeActions(sell)
   };
