@@ -28,19 +28,38 @@ const VETO_LINE_MOVE = 0.25;    // 盘口向我方不利方向移动 ≥0.25 →
 if (!BARK && !DRY) { console.error('缺 BARK_KEY'); process.exit(1); }
 
 async function sbGet(key) {
-  const r = await fetch(`${SB}/rest/v1/kv_store?key=eq.${key}&select=value`, { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } });
-  const text = await r.text();
-  if (!r.ok) throw new Error(`读取 ${key} 失败: HTTP ${r.status} ${text.slice(0, 160)}`);
-  if (!text.trim()) return null;
-  const j = JSON.parse(text);
-  return (j && j[0] && j[0].value) || null;
+  const url = `${SB}/rest/v1/kv_store?key=eq.${key}&select=value`;
+  for (let i = 1; i <= 3; i++) {
+    try {
+      const r = await fetch(url, { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } });
+      const text = await r.text();
+      if (!r.ok) throw new Error(`HTTP ${r.status} ${text.slice(0, 160)}`);
+      if (!text.trim()) return null;
+      const j = JSON.parse(text);
+      return (j && j[0] && j[0].value) || null;
+    } catch (e) {
+      if (i === 3) throw new Error(`读取 ${key} 失败: ${e.message}`);
+      await new Promise(res => setTimeout(res, i * 2000));
+    }
+  }
+  return null;
 }
+// 带重试 + 失败抛错:写失败不再静默通过(否则 fp_pushState 丢写→下轮重复推 Bark)
 async function sbSet(key, value) {
-  await fetch(`${SB}/rest/v1/kv_store?on_conflict=key`, {
-    method: 'POST',
-    headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' },
-    body: JSON.stringify({ key, value })
-  });
+  for (let i = 1; i <= 3; i++) {
+    try {
+      const r = await fetch(`${SB}/rest/v1/kv_store?on_conflict=key`, {
+        method: 'POST',
+        headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' },
+        body: JSON.stringify({ key, value })
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status} ${(await r.text()).slice(0, 160)}`);
+      return;
+    } catch (e) {
+      if (i === 3) throw new Error(`写入 ${key} 失败: ${e.message}`);
+      await new Promise(res => setTimeout(res, i * 2000));
+    }
+  }
 }
 function bjParts(d = new Date()) {
   const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hour12: false }).formatToParts(d);
