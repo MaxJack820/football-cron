@@ -8,6 +8,13 @@ on:
     - cron: '45 * * * *'
   workflow_dispatch: {}
 
+# 防止多触发源(GitHub schedule + cron-job.org + 手动)重叠运行:
+# push_value 对 fp_pushState/fp_valueBets 是读-改-写非原子,重叠会双推/互相覆盖。
+# 排队而非取消(cancel-in-progress:false),保证每次都跑完。
+concurrency:
+  group: fp-predict
+  cancel-in-progress: false
+
 jobs:
   predict:
     runs-on: ubuntu-22.04
