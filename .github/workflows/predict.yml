@@ -2,10 +2,10 @@ name: 足球预测·后台定时更新
 
 on:
   schedule:
-    - cron: '0 * * * *'
-    - cron: '15 * * * *'
-    - cron: '30 * * * *'
-    - cron: '45 * * * *'
+    # 由每15分钟(0/15/30/45)降为每30分钟。选 :17/:47 避开整点/半点的 GitHub 调度拥堵(整点排队常延迟数分钟)。
+    # ⚠️ 若 cron-job.org 仍每15分钟触发,总频率不会降——需同步把 cron-job.org 那条任务也改成每30分钟。
+    - cron: '17 * * * *'
+    - cron: '47 * * * *'
   workflow_dispatch: {}
 
 # 防止多触发源(GitHub schedule + cron-job.org + 手动)重叠运行:
@@ -14,6 +14,10 @@ on:
 concurrency:
   group: fp-predict
   cancel-in-progress: false
+
+# 固定 Playwright 版本,让浏览器缓存 key 稳定(不锁版本则每次 npm i 可能装到新版→缓存永远 miss)。
+env:
+  PW_VERSION: '1.59.1'
 
 jobs:
   predict:
@@ -26,10 +30,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - name: 缓存 Playwright 浏览器
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ env.PW_VERSION }}
       - name: 安装无头浏览器
+        # 缓存命中时 chromium 已在 ~/.cache/ms-playwright,install 会跳过下载(省 3-5 分钟),只装 apt 系统依赖。
         run: |
           npm init -y
-          npm i playwright
+          npm i playwright@${{ env.PW_VERSION }}
           npx playwright install --with-deps chromium
       - name: 运行一次预测
         run: node run.js
