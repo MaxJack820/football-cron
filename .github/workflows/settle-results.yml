@@ -6,6 +6,11 @@ on:
     - cron: '5,35 * * * *'
   workflow_dispatch: {}
 
+# 与 predict.yml 里的结算步骤同写云端历史,避免两条结算路径并发。
+concurrency:
+  group: fp-settle
+  cancel-in-progress: false
+
 jobs:
   settle:
     runs-on: ubuntu-22.04
