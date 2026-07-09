@@ -11,41 +11,45 @@ if (!AF_KEY) {
 
 (async () => {
   const browser = await chromium.launch();
-  const ctx = await browser.newContext();
+  let result;
+  try {
+    const ctx = await browser.newContext();
 
-  await ctx.addInitScript((key) => {
-    localStorage.setItem('fp_apiFootballKey', key);
-    localStorage.setItem('fp_autoUpdate', '0');
-  }, AF_KEY);
+    await ctx.addInitScript((key) => {
+      localStorage.setItem('fp_apiFootballKey', key);
+      localStorage.setItem('fp_autoUpdate', '0');
+    }, AF_KEY);
 
-  const page = await ctx.newPage();
-  page.on('console', m => console.log('[页面]', m.text()));
-  page.on('pageerror', e => console.log('[页面错误]', e.message));
+    const page = await ctx.newPage();
+    page.on('console', m => console.log('[页面]', m.text()));
+    page.on('pageerror', e => console.log('[页面错误]', e.message));
 
-  const url = 'https://bitter-darkness-1c66.max396430.workers.dev/football_new';
-  console.log('打开页面:', url);
-  await page.goto(url, { waitUntil: 'load' });
+    const url = 'https://bitter-darkness-1c66.max396430.workers.dev/football_new';
+    console.log('打开页面:', url);
+    await page.goto(url, { waitUntil: 'load' });
 
-  // 等云端历史数据和页面函数初始化完成。
-  await page.waitForTimeout(8000);
-
-  const result = await page.evaluate(async () => {
-    if (typeof autoSettlePendingResults !== 'function') {
-      return { error: 'autoSettlePendingResults not found' };
-    }
-    return await autoSettlePendingResults({ silent: true, max: 40, minAgeHours: 2 });
-  });
-
-  console.log('自动结算结果:', JSON.stringify(result));
-  if (result && result.settled > 0) {
-    console.log('等待云端同步写入…');
+    // 等云端历史数据和页面函数初始化完成。
     await page.waitForTimeout(8000);
+
+    result = await page.evaluate(async () => {
+      if (typeof autoSettlePendingResults !== 'function') {
+        return { error: 'autoSettlePendingResults not found' };
+      }
+      return await autoSettlePendingResults({ silent: true, max: 40, minAgeHours: 2 });
+    });
+
+    console.log('自动结算结果:', JSON.stringify(result));
+    if (result && result.settled > 0) {
+      console.log('等待云端同步写入…');
+      await page.waitForTimeout(8000);
+    }
+  } finally {
+    await browser.close();
   }
-  await browser.close();
 
   if (result && result.error) {
     console.error('❌ 自动结算失败:', result.error);
     process.exit(1);
   }
   console.log('✅ 完成：已自动结算所有可确认完赛的历史预测。');
-})();
+})().catch(e => { console.error('❌ 结算运行失败:', e); process.exit(1); });
