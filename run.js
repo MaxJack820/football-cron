@@ -25,7 +25,7 @@ const ARTIFACT_PATH = process.env.REFRESH_AUDIT_FILE || '.refresh-audit.json';
 const SOURCE_MAX_AGE_MS = Number(process.env.FP_SOURCE_MAX_AGE_MS) || DEFAULT_SOURCE_MAX_AGE_MS;
 const CLOUD_AUDIT_WAIT_MS = Number(process.env.FP_CLOUD_AUDIT_WAIT_MS) || 120000;
 const CLOUD_AUDIT_POLL_MS = 8000;
-const MIN_PAGE_BUILD = process.env.FP_MIN_PAGE_BUILD || '260711.4';
+const MIN_PAGE_BUILD = process.env.FP_MIN_PAGE_BUILD || '260711.5';
 const generationId = process.env.FP_REFRESH_GENERATION_ID || `refresh-${new Date().toISOString().replace(/[-:.TZ]/g, '')}-${crypto.randomUUID().slice(0, 8)}`;
 const startedAt = new Date().toISOString();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -113,6 +113,7 @@ async function waitForCloudAudit(context) {
     await page.goto(PAGE_URL, { waitUntil: 'load', timeout: 120000 });
     await page.waitForFunction(() => (
       typeof _sbReady !== 'undefined' && _sbReady === true &&
+      typeof _sbHydrated !== 'undefined' && _sbHydrated === true &&
       typeof _dailyScheduleSweep === 'function' &&
       typeof _autoUpcoming === 'function' &&
       typeof _autoUpdateTick === 'function'
