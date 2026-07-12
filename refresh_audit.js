@@ -341,7 +341,9 @@ function auditGeneration({ fetchData, history, generationId, targetKeys, started
         generationId,
         startedMs,
         nowMs: now,
-        sourceMaxAgeMs: sourceMaxAgeMs || DEFAULT_SOURCE_MAX_AGE_MS
+        // 不传时交给 validateMarketSnapshot 按 kickoffMs 走分级(源龄上限5h);
+        // 只有显式传入(运维/测试收紧)才覆盖。绝不回退旧的 15min 默认,否则分级被架空、全场误判 stale。
+        ...(sourceMaxAgeMs ? { sourceMaxAgeMs } : {})
       });
     if (!blocked && !recordMatchesSnapshot(record, snapshot)) {
       itemErrors.push({ code: 'fetch_record_market_mismatch', detail: 'fp_fetchData 顶层盘口赔率与 marketSnapshot 不一致' });
@@ -474,11 +476,13 @@ async function cli() {
   const index = process.argv.indexOf('--artifact');
   const artifactPath = index >= 0 ? process.argv[index + 1] : (process.env.REFRESH_AUDIT_FILE || '.refresh-audit.json');
   const artifact = readArtifact(artifactPath);
+  const _envAge = Number(process.env.FP_SOURCE_MAX_AGE_MS);
   const result = await auditCloud({
     generationId: artifact.generationId,
     targetKeys: artifact.targetKeys,
     startedAt: artifact.startedAt,
-    sourceMaxAgeMs: Number(process.env.FP_SOURCE_MAX_AGE_MS) || DEFAULT_SOURCE_MAX_AGE_MS
+    // 默认不传→走 kickoffMs 分级(源龄上限5h);仅 FP_SOURCE_MAX_AGE_MS 显式设置时覆盖。不再回退旧15min默认。
+    ...(Number.isFinite(_envAge) && _envAge > 0 ? { sourceMaxAgeMs: _envAge } : {})
   });
   console.log(`[refresh-audit] ${formatSummary(result)}`);
   if (!result.ok) {
