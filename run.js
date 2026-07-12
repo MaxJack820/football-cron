@@ -8,7 +8,6 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const { chromium } = require('playwright');
 const {
-  DEFAULT_SOURCE_MAX_AGE_MS,
   auditCloud,
   formatSummary
 } = require('./refresh_audit');
@@ -22,10 +21,13 @@ if (!AF_KEY) {
 
 const PAGE_URL = process.env.FP_PAGE_URL || 'https://bitter-darkness-1c66.max396430.workers.dev/football_new';
 const ARTIFACT_PATH = process.env.REFRESH_AUDIT_FILE || '.refresh-audit.json';
-const SOURCE_MAX_AGE_MS = Number(process.env.FP_SOURCE_MAX_AGE_MS) || DEFAULT_SOURCE_MAX_AGE_MS;
+// 默认不再硬设 15min;新鲜度改由 refresh_audit 按距开赛分级(与前端一致)。仅当显式设 FP_SOURCE_MAX_AGE_MS 时覆盖分级。
+const SOURCE_MAX_AGE_MS = process.env.FP_SOURCE_MAX_AGE_MS ? Number(process.env.FP_SOURCE_MAX_AGE_MS) : null;
 const CLOUD_AUDIT_WAIT_MS = Number(process.env.FP_CLOUD_AUDIT_WAIT_MS) || 120000;
 const CLOUD_AUDIT_POLL_MS = 8000;
-const MIN_PAGE_BUILD = process.env.FP_MIN_PAGE_BUILD || '260711.8';
+// ⚠️ 必须 >= 线上页面 build 号。分级新鲜度依赖页面把 kickoffMs 写进快照;若线上是旧页面(无 kickoffMs),
+// 快照会落到最严档(15min)→远期场仍被误拦。所以部署顺序:先传新页面到 Cloudflare,再让后端跑。
+const MIN_PAGE_BUILD = process.env.FP_MIN_PAGE_BUILD || '260712.1';
 const generationId = process.env.FP_REFRESH_GENERATION_ID || `refresh-${new Date().toISOString().replace(/[-:.TZ]/g, '')}-${crypto.randomUUID().slice(0, 8)}`;
 const startedAt = new Date().toISOString();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -74,7 +76,7 @@ async function waitForCloudAudit(context) {
   let lastError = null;
   do {
     try {
-      lastResult = await auditCloud({ ...context, sourceMaxAgeMs: SOURCE_MAX_AGE_MS });
+      lastResult = await auditCloud({ ...context, ...(SOURCE_MAX_AGE_MS ? { sourceMaxAgeMs: SOURCE_MAX_AGE_MS } : {}) });
       lastError = null;
       console.log(`[审计] ${formatSummary(lastResult)}`);
       if (lastResult.ok || immutableAuditFailure(lastResult)) return lastResult;
@@ -90,7 +92,7 @@ async function waitForCloudAudit(context) {
 
 (async () => {
   console.log('本轮 generation:', generationId);
-  console.log('源赔率最大允许年龄:', `${SOURCE_MAX_AGE_MS / 60000} 分钟`);
+  console.log('源赔率最大允许年龄:', SOURCE_MAX_AGE_MS ? `${SOURCE_MAX_AGE_MS / 60000} 分钟(环境覆盖)` : '按距开赛分级(<1h→15min / 1-6h→60min / >6h→4h)');
   const browser = await chromium.launch();
   let pageResult = null;
   let apiProxyStats = null;
