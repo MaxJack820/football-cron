@@ -25,7 +25,7 @@ const ARTIFACT_PATH = process.env.REFRESH_AUDIT_FILE || '.refresh-audit.json';
 const SOURCE_MAX_AGE_MS = Number(process.env.FP_SOURCE_MAX_AGE_MS) || DEFAULT_SOURCE_MAX_AGE_MS;
 const CLOUD_AUDIT_WAIT_MS = Number(process.env.FP_CLOUD_AUDIT_WAIT_MS) || 120000;
 const CLOUD_AUDIT_POLL_MS = 8000;
-const MIN_PAGE_BUILD = process.env.FP_MIN_PAGE_BUILD || '260711.6';
+const MIN_PAGE_BUILD = process.env.FP_MIN_PAGE_BUILD || '260711.8';
 const generationId = process.env.FP_REFRESH_GENERATION_ID || `refresh-${new Date().toISOString().replace(/[-:.TZ]/g, '')}-${crypto.randomUUID().slice(0, 8)}`;
 const startedAt = new Date().toISOString();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));

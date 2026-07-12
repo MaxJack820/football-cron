@@ -19,12 +19,19 @@ function hasApiErrors(payload) {
   return !!(errors && typeof errors === 'object' && Object.keys(errors).length);
 }
 
+function apiErrorKeys(payload) {
+  if (!payload || typeof payload !== 'object') return [];
+  const errors = payload.errors;
+  if (Array.isArray(errors)) return errors.length ? ['array'] : [];
+  return errors && typeof errors === 'object' ? Object.keys(errors) : [];
+}
+
 async function installApiFootballProxy(context, { apiKey, fetchImpl = globalThis.fetch } = {}) {
   if (!context || typeof context.route !== 'function') throw new Error('Playwright context.route unavailable');
   if (!apiKey) throw new Error('API-Football key missing');
   if (typeof fetchImpl !== 'function') throw new Error('Node fetch unavailable');
 
-  const stats = { total: 0, options: 0, upstreamOk: 0, upstreamErrors: 0, apiErrors: 0, statusCounts: {}, endpointCounts: {} };
+  const stats = { total: 0, options: 0, upstreamOk: 0, upstreamErrors: 0, apiErrors: 0, apiErrorKinds: {}, statusCounts: {}, endpointCounts: {} };
   await context.route(`${API_ORIGIN}/**`, async route => {
     const request = route.request();
     const method = String(request.method()).toUpperCase();
@@ -55,7 +62,13 @@ async function installApiFootballProxy(context, { apiKey, fetchImpl = globalThis
       if (status >= 200 && status < 400) stats.upstreamOk++;
       else stats.upstreamErrors++;
       if ((response.headers.get('content-type') || '').includes('application/json')) {
-        try { if (hasApiErrors(JSON.parse(body.toString('utf8')))) stats.apiErrors++; } catch (error) {}
+        try {
+          const payload = JSON.parse(body.toString('utf8'));
+          if (hasApiErrors(payload)) {
+            stats.apiErrors++;
+            for (const key of apiErrorKeys(payload)) stats.apiErrorKinds[key] = (stats.apiErrorKinds[key] || 0) + 1;
+          }
+        } catch (error) {}
       }
       await route.fulfill({
         status,
@@ -82,8 +95,14 @@ async function installApiFootballProxy(context, { apiKey, fetchImpl = globalThis
 function hasInfrastructureFailure(stats) {
   if (!stats) return false;
   if ((stats.total || 0) > 0 && (stats.upstreamOk || 0) === 0) return true;
-  if ((stats.upstreamErrors || 0) > 0 || (stats.apiErrors || 0) > 0) return true;
-  return Object.keys(stats.statusCounts || {}).some(code => Number(code) === 401 || Number(code) === 403 || Number(code) === 429 || Number(code) >= 500);
+  if ((stats.upstreamErrors || 0) > 0) return true;
+  if (Object.keys(stats.statusCounts || {}).some(code => Number(code) === 401 || Number(code) === 403 || Number(code) === 429 || Number(code) >= 500)) return true;
+  // API-Football 把参数校验错误也放在 HTTP 200 的 errors 中。少量 search/season 错误是
+  // 单场数据问题，不应把整轮误报成基础设施宕机；认证、额度错误或绝大多数请求报错才是。
+  const criticalKinds = /key|token|account|subscription|access|permission|rate|limit|request/i;
+  if (Object.keys(stats.apiErrorKinds || {}).some(key => criticalKinds.test(key))) return true;
+  const total = Number(stats.total || 0), apiErrors = Number(stats.apiErrors || 0);
+  return total > 0 && apiErrors >= 3 && apiErrors / total >= 0.8;
 }
 
-module.exports = { API_ORIGIN, corsHeaders, hasApiErrors, installApiFootballProxy, hasInfrastructureFailure };
+module.exports = { API_ORIGIN, corsHeaders, hasApiErrors, apiErrorKeys, installApiFootballProxy, hasInfrastructureFailure };

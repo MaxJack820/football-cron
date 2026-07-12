@@ -65,4 +65,6 @@ test('preflight is answered locally and upstream 429 is classified as infrastruc
   assert.equal(hasInfrastructureFailure(limitedStats), true);
 
   assert.equal(hasInfrastructureFailure({ total: 3, upstreamOk: 0, upstreamErrors: 0, apiErrors: 0, statusCounts: {} }), true);
+  assert.equal(hasInfrastructureFailure({ total: 40, upstreamOk: 40, upstreamErrors: 0, apiErrors: 2, apiErrorKinds: { search: 2 }, statusCounts: { 200: 40 } }), false);
+  assert.equal(hasInfrastructureFailure({ total: 4, upstreamOk: 4, upstreamErrors: 0, apiErrors: 4, apiErrorKinds: { search: 4 }, statusCounts: { 200: 4 } }), true);
 });
