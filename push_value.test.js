@@ -143,6 +143,15 @@ test('缺少、过期或顶层不一致的市场快照全部 fail closed', () =>
   assert.equal(validateMarketSnapshot(fetchData(flat, { ahLine: null }), NOW).reason, 'snapshot-top-level-ah-mismatch');
 });
 
+test('推送新鲜度门禁按距开赛分级', () => {
+  // 远期场(距开赛10h,>6h档允许源龄4h):源龄2h应放行。
+  const far = snapshot({ sourceUpdatedAt: NOW - 2 * 3600e3, fetchedAt: NOW - 30e3, expiresAt: NOW + 60 * 60e3, kickoffMs: NOW + 10 * 3600e3 });
+  assert.equal(validateMarketSnapshot(fetchData(far), NOW).ok, true);
+  // 临近场(距开赛30min,<1h档仅15min):同样源龄2h应拒绝。
+  const near = snapshot({ sourceUpdatedAt: NOW - 2 * 3600e3, fetchedAt: NOW - 30e3, kickoffMs: NOW + 30 * 60e3 });
+  assert.equal(validateMarketSnapshot(fetchData(near), NOW).reason, 'source-stale');
+});
+
 test('AH 相同但胜平负串代，fetchData 与 version 都必须拒绝', () => {
   const s = snapshot();
   assert.equal(validateMarketSnapshot(fetchData(s, { oddsHome: 2.55 }), NOW).reason, 'snapshot-top-level-win-mismatch');
