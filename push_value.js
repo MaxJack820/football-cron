@@ -16,13 +16,15 @@ const EV_MIN = 0.08, STAKE = 50, STAKE_HI = 75, EV_HI = 0.12, DAILY_CAP = 8, MAT
 const _configuredMarketAge = +(process.env.MARKET_MAX_AGE_MIN || 15);
 const MARKET_MAX_AGE_MIN = Math.min(15, Number.isFinite(_configuredMarketAge) && _configuredMarketAge > 0 ? _configuredMarketAge : 15);
 const MARKET_MAX_AGE_MS = MARKET_MAX_AGE_MIN * 60e3;
-// 按距开赛分级的源龄门禁,必须与前端 MARKET_FRESHNESS_TIERS / refresh_audit 完全一致。
-// 旧硬顶 15min 与 API-Football 源约3-4h的刷新节奏冲突→价值号在远期场几乎永远推不出;分级后远期宽松、临近从严。
-// kickoffMs 由快照携带(不进 snapshotId 哈希)。若显式设了 MARKET_MAX_AGE_MIN 环境变量,则以该硬顶为上限(取更严者)。
+// 源龄门禁,必须与前端 MARKET_FRESHNESS_TIERS / refresh_audit 完全一致。
+// 实测(260713):API-Football 赛前赔率每4小时批量更新一次,不分远期近期。源龄上限统一放宽到 5h(4h批次+缓冲),
+// 否则价值号在批次之间几乎永远推不出。若显式设了 MARKET_MAX_AGE_MIN 环境变量,则以该硬顶为上限(取更严者)。
+// kickoffMs 由快照携带(不进 snapshotId 哈希)。
+const _SRC_MAX_AGE_MS = 5 * 60 * 60e3;
 const MARKET_FRESHNESS_TIERS = [
-  { maxHoursToKo: 1, sourceMaxAgeMs: 15 * 60e3 },
-  { maxHoursToKo: 6, sourceMaxAgeMs: 60 * 60e3 },
-  { maxHoursToKo: Infinity, sourceMaxAgeMs: 4 * 60 * 60e3 }
+  { maxHoursToKo: 1, sourceMaxAgeMs: _SRC_MAX_AGE_MS },
+  { maxHoursToKo: 6, sourceMaxAgeMs: _SRC_MAX_AGE_MS },
+  { maxHoursToKo: Infinity, sourceMaxAgeMs: _SRC_MAX_AGE_MS }
 ];
 const _ageEnvForced = process.env.MARKET_MAX_AGE_MIN != null && Number.isFinite(_configuredMarketAge) && _configuredMarketAge > 0;
 function marketMaxAgeMs(snapshot, atMs) {
