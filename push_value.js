@@ -16,6 +16,27 @@ const EV_MIN = 0.08, STAKE = 50, STAKE_HI = 75, EV_HI = 0.12, DAILY_CAP = 8, MAT
 const _configuredMarketAge = +(process.env.MARKET_MAX_AGE_MIN || 15);
 const MARKET_MAX_AGE_MIN = Math.min(15, Number.isFinite(_configuredMarketAge) && _configuredMarketAge > 0 ? _configuredMarketAge : 15);
 const MARKET_MAX_AGE_MS = MARKET_MAX_AGE_MIN * 60e3;
+// 按距开赛分级的源龄门禁,必须与前端 MARKET_FRESHNESS_TIERS / refresh_audit 完全一致。
+// 旧硬顶 15min 与 API-Football 源约3-4h的刷新节奏冲突→价值号在远期场几乎永远推不出;分级后远期宽松、临近从严。
+// kickoffMs 由快照携带(不进 snapshotId 哈希)。若显式设了 MARKET_MAX_AGE_MIN 环境变量,则以该硬顶为上限(取更严者)。
+const MARKET_FRESHNESS_TIERS = [
+  { maxHoursToKo: 1, sourceMaxAgeMs: 15 * 60e3 },
+  { maxHoursToKo: 6, sourceMaxAgeMs: 60 * 60e3 },
+  { maxHoursToKo: Infinity, sourceMaxAgeMs: 4 * 60 * 60e3 }
+];
+const _ageEnvForced = process.env.MARKET_MAX_AGE_MIN != null && Number.isFinite(_configuredMarketAge) && _configuredMarketAge > 0;
+function marketMaxAgeMs(snapshot, atMs) {
+  const koMs = Number(snapshot && snapshot.kickoffMs);
+  let tierMs;
+  if (!Number.isFinite(koMs)) tierMs = MARKET_FRESHNESS_TIERS[0].sourceMaxAgeMs;
+  else {
+    const hrs = (koMs - (Number.isFinite(atMs) ? atMs : Date.now())) / 3600e3;
+    const t = MARKET_FRESHNESS_TIERS.find(x => hrs <= x.maxHoursToKo) || MARKET_FRESHNESS_TIERS[MARKET_FRESHNESS_TIERS.length - 1];
+    tierMs = t.sourceMaxAgeMs;
+  }
+  // 显式设了环境上限时,不允许分级放宽超过它(取更严者)——保留运维手动收紧推送的能力。
+  return _ageEnvForced ? Math.min(tierMs, MARKET_MAX_AGE_MS) : tierMs;
+}
 const CLOCK_SKEW_MS = 2 * 60e3;
 const ENABLE_AH_PUSH = process.env.ENABLE_AH_PUSH !== '0';
 // 观察盘采样:胜平负/三项让球只【记录到 fp_watchBets】不推送不下注,积累真实样本供日后评估是否转正。
@@ -233,8 +254,9 @@ function validateMarketSnapshot(fdo, now = Date.now()) {
   if (sourceUpdatedAt > now + CLOCK_SKEW_MS || fetchedAt > now + CLOCK_SKEW_MS) return { ok: false, reason: 'snapshot-from-future' };
   if (fetchedAt + CLOCK_SKEW_MS < sourceUpdatedAt) return { ok: false, reason: 'snapshot-ts-order-invalid' };
   if (expiresAt <= now) return { ok: false, reason: 'snapshot-expired' };
-  if (now - sourceUpdatedAt > MARKET_MAX_AGE_MS) return { ok: false, reason: 'source-stale' };
-  if (now - fetchedAt > MARKET_MAX_AGE_MS) return { ok: false, reason: 'fetch-stale' };
+  const _maxAgeMs = marketMaxAgeMs(s, now);
+  if (now - sourceUpdatedAt > _maxAgeMs) return { ok: false, reason: 'source-stale' };
+  if (now - fetchedAt > _maxAgeMs) return { ok: false, reason: 'fetch-stale' };
 
   const win = s.markets && s.markets.win;
   if (!win || !validOdds(win.home) || !validOdds(win.draw) || !validOdds(win.away)) {
@@ -336,7 +358,8 @@ function validateModelVersion(v, market, now = Date.now(), ko = null) {
     return { ok: false, reason: 'version-freshness-copy-mismatch' };
   }
   if (sourceUpdatedAt > now + CLOCK_SKEW_MS || fetchedAt > now + CLOCK_SKEW_MS || expiresAt <= now) return { ok: false, reason: 'version-snapshot-expired' };
-  if (now - sourceUpdatedAt > MARKET_MAX_AGE_MS || now - fetchedAt > MARKET_MAX_AGE_MS) return { ok: false, reason: 'version-snapshot-stale' };
+  const _vMaxAgeMs = marketMaxAgeMs(vs, now);
+  if (now - sourceUpdatedAt > _vMaxAgeMs || now - fetchedAt > _vMaxAgeMs) return { ok: false, reason: 'version-snapshot-stale' };
   const vwin = vs.markets && vs.markets.win;
   if (!vwin || !sameNumber(vwin.home, market.win.home) || !sameNumber(vwin.draw, market.win.draw) || !sameNumber(vwin.away, market.win.away)) {
     return { ok: false, reason: 'version-win-mismatch' };
