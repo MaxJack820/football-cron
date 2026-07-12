@@ -58,7 +58,7 @@ jobs:
           SB_KEY: ${{ secrets.SB_KEY }}
           REFRESH_AUDIT_FILE: .refresh-audit.json
       # 价值号只能跟在“本轮刷新 + 云端二次审计”都成功之后运行。
-      # 不再使用 if:always；抓盘失败、源赔率超过15分钟、盘口赔率串代时一律不推。
+      # 不再使用 if:always；抓盘失败、源赔率超过该场时段允许上限(按距开赛分级)、盘口赔率串代时一律不推。
       - name: 推送价值号(Bark)
         run: node push_value.js
         env:
