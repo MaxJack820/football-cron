@@ -2,6 +2,7 @@
 // 结算逻辑仍在网页里执行，避免前端/后台两套口径不一致。
 
 const { chromium } = require('playwright');
+const { installApiFootballProxy, hasInfrastructureFailure } = require('./api_football_proxy');
 
 const AF_KEY = process.env.AF_KEY || '';
 if (!AF_KEY) {
@@ -12,13 +13,15 @@ if (!AF_KEY) {
 (async () => {
   const browser = await chromium.launch();
   let result;
+  let apiProxyStats;
   try {
     const ctx = await browser.newContext();
+    apiProxyStats = await installApiFootballProxy(ctx, { apiKey: AF_KEY });
 
-    await ctx.addInitScript((key) => {
-      localStorage.setItem('fp_apiFootballKey', key);
+    await ctx.addInitScript(() => {
+      localStorage.setItem('fp_apiFootballKey', '__server_proxy__');
       localStorage.setItem('fp_autoUpdate', '0');
-    }, AF_KEY);
+    });
 
     const page = await ctx.newPage();
     page.on('console', m => console.log('[页面]', m.text()));
@@ -39,6 +42,10 @@ if (!AF_KEY) {
     });
 
     console.log('自动结算结果:', JSON.stringify(result));
+    console.log('API-Football 服务端代理:', JSON.stringify(apiProxyStats));
+    if (result && result.failed > 0 && hasInfrastructureFailure(apiProxyStats)) {
+      result.error = `API-Football 基础设施失败：${JSON.stringify(apiProxyStats)}`;
+    }
     if (result && result.settled > 0) {
       console.log('等待云端同步写入…');
       await page.waitForTimeout(8000);

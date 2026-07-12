@@ -12,6 +12,7 @@ const {
   auditCloud,
   formatSummary
 } = require('./refresh_audit');
+const { installApiFootballProxy, hasInfrastructureFailure } = require('./api_football_proxy');
 
 const AF_KEY = process.env.AF_KEY || '';
 if (!AF_KEY) {
@@ -24,7 +25,7 @@ const ARTIFACT_PATH = process.env.REFRESH_AUDIT_FILE || '.refresh-audit.json';
 const SOURCE_MAX_AGE_MS = Number(process.env.FP_SOURCE_MAX_AGE_MS) || DEFAULT_SOURCE_MAX_AGE_MS;
 const CLOUD_AUDIT_WAIT_MS = Number(process.env.FP_CLOUD_AUDIT_WAIT_MS) || 120000;
 const CLOUD_AUDIT_POLL_MS = 8000;
-const MIN_PAGE_BUILD = process.env.FP_MIN_PAGE_BUILD || '260711.3';
+const MIN_PAGE_BUILD = process.env.FP_MIN_PAGE_BUILD || '260711.4';
 const generationId = process.env.FP_REFRESH_GENERATION_ID || `refresh-${new Date().toISOString().replace(/[-:.TZ]/g, '')}-${crypto.randomUUID().slice(0, 8)}`;
 const startedAt = new Date().toISOString();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -92,14 +93,17 @@ async function waitForCloudAudit(context) {
   console.log('源赔率最大允许年龄:', `${SOURCE_MAX_AGE_MS / 60000} 分钟`);
   const browser = await chromium.launch();
   let pageResult = null;
+  let apiProxyStats = null;
   try {
     const context = await browser.newContext();
-    await context.addInitScript(({ apiKey, generation }) => {
-      localStorage.setItem('fp_apiFootballKey', apiKey);
+    apiProxyStats = await installApiFootballProxy(context, { apiKey: AF_KEY });
+    await context.addInitScript(({ generation }) => {
+      // 页面只需知道后台数据源可用；真实 key 留在 Node 侧代理，绝不进入 DOM/localStorage。
+      localStorage.setItem('fp_apiFootballKey', '__server_proxy__');
       // 禁掉页面 8 秒后的自由运行；由 run.js 明确地“扫赛程 -> 定目标 -> 强制抓盘 -> 预测”。
       localStorage.setItem('fp_autoUpdate', '0');
       localStorage.setItem('fp_refreshGenerationId', generation);
-    }, { apiKey: AF_KEY, generation: generationId });
+    }, { generation: generationId });
 
     const page = await context.newPage();
     page.on('console', message => console.log('[页面]', message.text()));
@@ -131,7 +135,19 @@ async function waitForCloudAudit(context) {
       localStorage.setItem('fp_autoUpdate', '0');
 
       let swept = 0;
-      if (typeof _dailyScheduleSweep === 'function') swept = await _dailyScheduleSweep(true);
+      let scheduleSweepSkipped = false;
+      if (typeof _dailyScheduleSweep === 'function') {
+        // GitHub/cron-job 一天会启动很多个全新浏览器；每轮都强扫 44 个联赛×2 赛季会
+        // 在真正抓盘口前白耗大量额度并触发 API 的分钟级 429。赛程存档本身带云端 ts，
+        // 6 小时内直接复用；盘口仍在下面对每个 target 强制重抓，二者不能混为一谈。
+        let latestScheduleTs = 0;
+        try {
+          const arch = typeof _loadSchArch === 'function' ? _loadSchArch() : {};
+          latestScheduleTs = Math.max(0, ...Object.values(arch || {}).map(item => Number(item && item.ts) || 0));
+        } catch (e) {}
+        if (!latestScheduleTs || Date.now() - latestScheduleTs >= 6 * 3600 * 1000) swept = await _dailyScheduleSweep(true);
+        else scheduleSweepSkipped = true;
+      }
       const upcoming = (typeof _autoUpcoming === 'function' ? _autoUpcoming() : []);
       const targetKeys = [...new Set(upcoming.map(match => `${match.home} vs ${match.away}`))];
 
@@ -153,11 +169,19 @@ async function waitForCloudAudit(context) {
         history: await _sbWrite('fp_hist5', loadHist()),
         model: await _sbWrite('fp_v5', M)
       };
-      return { swept, targetKeys, refresh: refresh || null, cloudWrite, empty: false };
+      return { swept, scheduleSweepSkipped, targetKeys, refresh: refresh || null, cloudWrite, empty: false };
     }, generationId);
 
     console.log('赛程扫描:', pageResult.swept, '场；本轮候选:', pageResult.targetKeys.length, '场');
     console.log('页面刷新结果:', JSON.stringify(pageResult.refresh));
+    pageResult.apiProxyStats = JSON.parse(JSON.stringify(apiProxyStats));
+    console.log('API-Football 服务端代理:', JSON.stringify(pageResult.apiProxyStats));
+    const attemptedRefresh = Number(pageResult.refresh && pageResult.refresh.fetched || 0) > 0;
+    const proxyWasBypassed = attemptedRefresh && Number(apiProxyStats && apiProxyStats.total || 0) === 0;
+    if (pageResult.targetKeys.length && Number(pageResult.refresh && pageResult.refresh.updated || 0) === 0 && (proxyWasBypassed || hasInfrastructureFailure(apiProxyStats))) {
+      throw new Error(`API-Football 基础设施失败，全部候选均未生成预测：${JSON.stringify(pageResult.apiProxyStats)}`);
+    }
+    if (hasInfrastructureFailure(apiProxyStats)) console.warn('⚠️ API-Football 本轮存在部分上游错误，未通过盘口门禁的场次保持 blocked。');
   } catch (error) {
     writeArtifact({
       targetKeys: pageResult && pageResult.targetKeys || [],

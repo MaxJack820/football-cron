@@ -44,7 +44,7 @@ jobs:
       - name: 测试盘口新鲜度门禁
         # football_new/profit_value 的 DOM 契约测试依赖前端源码，保留在本地全量回归；
         # 此部署仓库只运行能在纯后端 checkout 中独立执行的测试。
-        run: node --test test/refresh_audit.test.js test/review_report.test.js push_value.test.js
+        run: node --test test/api_football_proxy.test.js test/refresh_audit.test.js test/review_report.test.js push_value.test.js
       - name: 运行一次预测
         run: node run.js
         env:
@@ -61,7 +61,6 @@ jobs:
       # 不再使用 if:always；抓盘失败、源赔率超过15分钟、盘口赔率串代时一律不推。
       - name: 推送价值号(Bark)
         run: node push_value.js
-        continue-on-error: true
         env:
           BARK_KEY: ${{ secrets.BARK_KEY }}
           SB_KEY: ${{ secrets.SB_KEY }}
@@ -70,6 +69,5 @@ jobs:
       - name: 自动结算已完赛赛果
         if: always()
         run: node settle_results.js
-        continue-on-error: true
         env:
           AF_KEY: ${{ secrets.AF_KEY }}
