@@ -98,7 +98,7 @@ test('同代、同快照、同赔率可通过审计', () => {
 
 test('仅 fetchedAt 新、源赔率时间旧仍拒绝', () => {
   const errors = validateMarketSnapshot(snapshot({
-    sourceUpdatedAt: '2026-07-11T09:30:00.000Z',
+    sourceUpdatedAt: '2026-07-11T04:00:00.000Z',
     fetchedAt: '2026-07-11T09:59:50.000Z'
   }), {
     generationId: GEN,
@@ -108,17 +108,21 @@ test('仅 fetchedAt 新、源赔率时间旧仍拒绝', () => {
   assert.ok(errors.some(error => error.code === 'source_stale'));
 });
 
-test('审计新鲜度门禁按距开赛分级', () => {
-  // 源赔率 2 小时前(相对 NOW=10:00 即 08:00)。远期场(距开赛10h)应放行,临近场(距开赛30min)应拒。
+test('审计源龄门禁:上限统一5h,超限才拒,可被显式值收紧', () => {
   const opts = { generationId: GEN, startedMs: Date.parse('2026-07-11T07:55:00.000Z'), nowMs: NOW };
-  const twoHAgo = '2026-07-11T08:00:00.000Z';
-  const far = snapshot({ sourceUpdatedAt: twoHAgo, fetchedAt: '2026-07-11T09:59:50.000Z', kickoffMs: NOW + 10 * 3600e3 });
-  assert.equal(validateMarketSnapshot(far, opts).filter(e => e.code === 'source_stale').length, 0, '远期场:源龄2h在4h档内,不应 source_stale');
-  const near = snapshot({ sourceUpdatedAt: twoHAgo, fetchedAt: '2026-07-11T09:59:50.000Z', kickoffMs: NOW + 30 * 60e3 });
-  assert.ok(validateMarketSnapshot(near, opts).some(e => e.code === 'source_stale'), '临近场:源龄2h超出15min档,应 source_stale');
-  // 显式 sourceMaxAgeMs 覆盖分级(运维收紧):远期场也按传入值判定。
+  // 源龄3.5h(相对 NOW=10:00 即 06:30):无论远近都应放行。
+  const srcAge = ageIso => ({ sourceUpdatedAt: ageIso, fetchedAt: '2026-07-11T09:59:50.000Z' });
+  const threeHalfAgo = '2026-07-11T06:30:00.000Z';
+  const near = snapshot({ ...srcAge(threeHalfAgo), kickoffMs: NOW + 30 * 60e3 });
+  assert.equal(validateMarketSnapshot(near, opts).filter(e => e.code === 'source_stale').length, 0, '临近场:源龄3.5h在5h上限内,不应 source_stale');
+  const far = snapshot({ ...srcAge(threeHalfAgo), kickoffMs: NOW + 10 * 3600e3 });
+  assert.equal(validateMarketSnapshot(far, opts).filter(e => e.code === 'source_stale').length, 0, '远期场:同样放行');
+  // 源龄6h超出5h上限:拒。
+  const tooOld = snapshot({ ...srcAge('2026-07-11T04:00:00.000Z'), kickoffMs: NOW + 10 * 3600e3 });
+  assert.ok(validateMarketSnapshot(tooOld, opts).some(e => e.code === 'source_stale'), '源龄6h应 source_stale');
+  // 显式 sourceMaxAgeMs 覆盖(运维收紧):源龄3.5h在15min上限下也应拒。
   const forced = validateMarketSnapshot(far, { ...opts, sourceMaxAgeMs: 15 * 60e3 });
-  assert.ok(forced.some(e => e.code === 'source_stale'), '显式 sourceMaxAgeMs=15min 时,远期场也应 source_stale');
+  assert.ok(forced.some(e => e.code === 'source_stale'), '显式 sourceMaxAgeMs=15min 时应 source_stale');
 });
 
 test('盘口主线投票与最终线不一致时拒绝', () => {
