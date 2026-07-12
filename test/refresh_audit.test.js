@@ -108,6 +108,19 @@ test('仅 fetchedAt 新、源赔率时间旧仍拒绝', () => {
   assert.ok(errors.some(error => error.code === 'source_stale'));
 });
 
+test('审计新鲜度门禁按距开赛分级', () => {
+  // 源赔率 2 小时前(相对 NOW=10:00 即 08:00)。远期场(距开赛10h)应放行,临近场(距开赛30min)应拒。
+  const opts = { generationId: GEN, startedMs: Date.parse('2026-07-11T07:55:00.000Z'), nowMs: NOW };
+  const twoHAgo = '2026-07-11T08:00:00.000Z';
+  const far = snapshot({ sourceUpdatedAt: twoHAgo, fetchedAt: '2026-07-11T09:59:50.000Z', kickoffMs: NOW + 10 * 3600e3 });
+  assert.equal(validateMarketSnapshot(far, opts).filter(e => e.code === 'source_stale').length, 0, '远期场:源龄2h在4h档内,不应 source_stale');
+  const near = snapshot({ sourceUpdatedAt: twoHAgo, fetchedAt: '2026-07-11T09:59:50.000Z', kickoffMs: NOW + 30 * 60e3 });
+  assert.ok(validateMarketSnapshot(near, opts).some(e => e.code === 'source_stale'), '临近场:源龄2h超出15min档,应 source_stale');
+  // 显式 sourceMaxAgeMs 覆盖分级(运维收紧):远期场也按传入值判定。
+  const forced = validateMarketSnapshot(far, { ...opts, sourceMaxAgeMs: 15 * 60e3 });
+  assert.ok(forced.some(e => e.code === 'source_stale'), '显式 sourceMaxAgeMs=15min 时,远期场也应 source_stale');
+});
+
 test('盘口主线投票与最终线不一致时拒绝', () => {
   const snap = snapshot();
   snap.markets.ah.mainLine.line = -0.5;
