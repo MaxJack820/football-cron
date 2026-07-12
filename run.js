@@ -1,10 +1,17 @@
-// 后台定时预测脚本：用无头浏览器打开你的线上网址，让网页里现有的"自动预测"逻辑跑一遍，
-// 预测结果会自动写进 Supabase 云端。你在任何设备打开 App 都会同步到最新。
-// —— 不需要重写你的模型，原封不动复用。
-//
-// API Key 从环境变量 AF_KEY 读取（存在 GitHub 加密 Secret 里），所以仓库可以公开而不泄露 Key。
+'use strict';
 
+// 后台定时预测入口。
+// 一轮刷新只有在“本轮 generation 的源赔率仍新鲜 -> 同快照完成预测 -> 云端审计通过”后才成功退出。
+// 工作流用退出码作为价值推送门禁，任何抓盘失败、旧盘伪刷新或盘口/赔率串代都会阻止后续推送。
+
+const crypto = require('node:crypto');
+const fs = require('node:fs');
 const { chromium } = require('playwright');
+const {
+  DEFAULT_SOURCE_MAX_AGE_MS,
+  auditCloud,
+  formatSummary
+} = require('./refresh_audit');
 
 const AF_KEY = process.env.AF_KEY || '';
 if (!AF_KEY) {
@@ -12,69 +19,172 @@ if (!AF_KEY) {
   process.exit(1);
 }
 
-// 智能退出用：轮询云端 fp_v5 的最新预测时间戳，预测一写回云端就提前收工，不再死等 300 秒。
-const SB = 'https://cexrkjetvholgcpinysy.supabase.co';
-const SB_KEY = process.env.SB_KEY || 'sb_publishable_PHn7mHo7mUgQBTD9GFLBaA_u8tjNfgd'; // publishable(可公开)
-// 读云端 fp_v5 里所有场次的最大 ts，作为“已写入新预测”的判据。失败返回 null(不影响，退回死等兜底)。
-async function cloudPredSig() {
-  try {
-    const r = await fetch(`${SB}/rest/v1/kv_store?key=eq.fp_v5&select=value`, { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } });
-    if (!r.ok) return null;
-    const j = await r.json();
-    let v = j && j[0] && j[0].value;
-    if (typeof v === 'string') { try { v = JSON.parse(v); } catch (e) { return null; } }
-    if (!v) return null;
-    const recs = Array.isArray(v) ? v : Object.values(v);
-    let mx = '';
-    for (const x of recs) { const t = x && (x.ts || x.predTime || ''); if (t && t > mx) mx = t; }
-    return mx || null;
-  } catch (e) { return null; }
+const PAGE_URL = process.env.FP_PAGE_URL || 'https://bitter-darkness-1c66.max396430.workers.dev/football_new';
+const ARTIFACT_PATH = process.env.REFRESH_AUDIT_FILE || '.refresh-audit.json';
+const SOURCE_MAX_AGE_MS = Number(process.env.FP_SOURCE_MAX_AGE_MS) || DEFAULT_SOURCE_MAX_AGE_MS;
+const CLOUD_AUDIT_WAIT_MS = Number(process.env.FP_CLOUD_AUDIT_WAIT_MS) || 120000;
+const CLOUD_AUDIT_POLL_MS = 8000;
+const MIN_PAGE_BUILD = process.env.FP_MIN_PAGE_BUILD || '260711.3';
+const generationId = process.env.FP_REFRESH_GENERATION_ID || `refresh-${new Date().toISOString().replace(/[-:.TZ]/g, '')}-${crypto.randomUUID().slice(0, 8)}`;
+const startedAt = new Date().toISOString();
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function buildRank(value) {
+  const parts = String(value || '').split('.');
+  return (Number(parts[0]) || 0) * 100000 + (Number(parts[1]) || 0);
 }
-const sleep = ms => new Promise(res => setTimeout(res, ms));
+
+function writeArtifact(extra) {
+  const artifact = {
+    schema: 1,
+    generationId,
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    targetKeys: [],
+    ok: false,
+    ...extra
+  };
+  fs.writeFileSync(ARTIFACT_PATH, `${JSON.stringify(artifact, null, 2)}\n`, 'utf8');
+  return artifact;
+}
+
+function immutableAuditFailure(result) {
+  // 这些错误不会因为等待 Supabase 的异步写入而自行恢复，立即失败即可。
+  const immutable = new Set([
+    'schema_invalid', 'source_invalid', 'fixture_id_missing', 'snapshot_id_missing',
+    'snapshot_id_content_mismatch',
+    'generation_mismatch', 'snapshot_invalid', 'main_line_unverified',
+    'source_ts_missing', 'source_ts_future', 'source_stale', 'fetched_at_missing',
+    'fetched_at_future', 'not_fetched_this_run', 'timestamp_order_invalid',
+    'expires_at_missing', 'snapshot_expired', 'markets_missing', 'win_market_invalid',
+    'ah_market_invalid', 'main_line_missing', 'main_line_mismatch', 'line_votes_invalid',
+    'sharp_votes_invalid', 'ou_market_invalid', 'prediction_generation_mismatch',
+    'fetch_record_market_mismatch', 'prediction_odds_mismatch', 'prediction_ts_invalid',
+    'prediction_snapshot_copy_mismatch', 'blocked_snapshot_missing', 'blocked_not_explicit',
+    'blocked_reason_missing', 'blocked_success_ts_advanced', 'blocked_has_prediction',
+    'blocked_market_residue', 'blocked_top_level_market_residue'
+  ]);
+  return result.errors.some(error => immutable.has(error.code));
+}
+
+async function waitForCloudAudit(context) {
+  const deadline = Date.now() + CLOUD_AUDIT_WAIT_MS;
+  let lastResult = null;
+  let lastError = null;
+  do {
+    try {
+      lastResult = await auditCloud({ ...context, sourceMaxAgeMs: SOURCE_MAX_AGE_MS });
+      lastError = null;
+      console.log(`[审计] ${formatSummary(lastResult)}`);
+      if (lastResult.ok || immutableAuditFailure(lastResult)) return lastResult;
+    } catch (error) {
+      lastError = error;
+      console.warn('[审计] 云端数据暂未就绪:', error.message || error);
+    }
+    if (Date.now() < deadline) await sleep(CLOUD_AUDIT_POLL_MS);
+  } while (Date.now() < deadline);
+  if (lastResult) return lastResult;
+  throw lastError || new Error('云端审计超时');
+}
 
 (async () => {
+  console.log('本轮 generation:', generationId);
+  console.log('源赔率最大允许年龄:', `${SOURCE_MAX_AGE_MS / 60000} 分钟`);
   const browser = await chromium.launch();
+  let pageResult = null;
   try {
-    const ctx = await browser.newContext();
+    const context = await browser.newContext();
+    await context.addInitScript(({ apiKey, generation }) => {
+      localStorage.setItem('fp_apiFootballKey', apiKey);
+      // 禁掉页面 8 秒后的自由运行；由 run.js 明确地“扫赛程 -> 定目标 -> 强制抓盘 -> 预测”。
+      localStorage.setItem('fp_autoUpdate', '0');
+      localStorage.setItem('fp_refreshGenerationId', generation);
+    }, { apiKey: AF_KEY, generation: generationId });
 
-    // 打开页面前先把 API Key + 自动更新开关注入（无头浏览器是全新空环境）
-    await ctx.addInitScript((key) => {
-      localStorage.setItem('fp_apiFootballKey', key);
-      localStorage.setItem('fp_autoUpdate', '1');
-    }, AF_KEY);
+    const page = await context.newPage();
+    page.on('console', message => console.log('[页面]', message.text()));
+    page.on('pageerror', error => console.error('[页面错误]', error.message));
 
-    const page = await ctx.newPage();
-    page.on('console', m => console.log('[页面]', m.text()));
-    page.on('pageerror', e => console.log('[页面错误]', e.message));
+    console.log('打开页面:', PAGE_URL);
+    await page.goto(PAGE_URL, { waitUntil: 'load', timeout: 120000 });
+    await page.waitForFunction(() => (
+      typeof _sbReady !== 'undefined' && _sbReady === true &&
+      typeof _dailyScheduleSweep === 'function' &&
+      typeof _autoUpcoming === 'function' &&
+      typeof _autoUpdateTick === 'function'
+    ), null, { timeout: 90000 });
 
-    // 直接打开你部署在 Cloudflare 的线上网址——以后只需在 Cloudflare 重新上传文件，
-    // 手机访问 + 后端定时就一起更新，不必再往 GitHub 仓库传 html。
-    const url = 'https://bitter-darkness-1c66.max396430.workers.dev/football_new';
-    console.log('打开页面:', url);
-    // 记录运行前云端预测签名，作为“本次是否已写入新预测”的基线
-    const sigBefore = await cloudPredSig();
-    console.log('运行前云端最新预测 ts =', sigBefore || '(读不到)');
-    await page.goto(url, { waitUntil: 'load' });
-
-    // 智能等待：预测写回云端(fp_v5 最大 ts 变新)后，再留 45 秒缓冲让“扫真实赛程/自愈队名”写完即提前退出。
-    // 死等 300 秒改为最多 300 秒轮询，正常场景 90–150 秒就能收工，省一半时间。读云端失败则退回死等兜底。
-    console.log('正在后台运行自动预测，轮询云端写入中（最多 300 秒，写入即提前退出）…');
-    const MAX_WAIT = 300000, POLL = 15000, GRACE = 45000;
-    const t0 = Date.now();
-    let done = false;
-    while (Date.now() - t0 < MAX_WAIT) {
-      await sleep(POLL);
-      const sig = await cloudPredSig();
-      if (sig && sig !== sigBefore) {
-        console.log(`检测到云端已写入新预测(ts ${sigBefore || '?'} → ${sig})，再留 ${GRACE / 1000}s 缓冲后退出。`);
-        await sleep(GRACE);
-        done = true;
-        break;
-      }
+    // 后台脚本依赖新版页面生成 marketSnapshot。线上 Cloudflare 仍是旧 build 时必须直接失败，
+    // 不能继续跑旧逻辑后再把“预测步骤执行过”误当成已经启用新鲜盘口链路。
+    const pageContract = await page.evaluate(() => ({
+      build: typeof _BUILD !== 'undefined' ? String(_BUILD) : '',
+      marketSnapshotSchema: typeof MARKET_SNAPSHOT_SCHEMA !== 'undefined' ? MARKET_SNAPSHOT_SCHEMA : null
+    }));
+    console.log('线上页面契约:', JSON.stringify(pageContract));
+    if (buildRank(pageContract.build) < buildRank(MIN_PAGE_BUILD) || Number(pageContract.marketSnapshotSchema) !== 1) {
+      throw new Error(`线上页面版本过旧或不支持市场快照：build=${pageContract.build || '?'} schema=${pageContract.marketSnapshotSchema}; 要求 build>=${MIN_PAGE_BUILD}, schema=1`);
     }
-    if (!done) console.log('未检测到云端 ts 变化(或读云端失败)，已按 300 秒兜底上限退出。');
+
+    // 先重建真实赛程，再冻结本轮候选列表。页面自动心跳保持关闭，避免审计目标在中途变化。
+    pageResult = await page.evaluate(async generation => {
+      localStorage.setItem('fp_refreshGenerationId', generation);
+      localStorage.setItem('fp_autoUpdate', '0');
+
+      let swept = 0;
+      if (typeof _dailyScheduleSweep === 'function') swept = await _dailyScheduleSweep(true);
+      const upcoming = (typeof _autoUpcoming === 'function' ? _autoUpcoming() : []);
+      const targetKeys = [...new Set(upcoming.map(match => `${match.home} vs ${match.away}`))];
+
+      if (!targetKeys.length) return { swept, targetKeys, refresh: { total: 0, updated: 0, fetched: 0 }, empty: true };
+
+      localStorage.setItem('fp_autoUpdate', '1');
+      let refresh;
+      try {
+        // forceOdds=true：本轮所有候选必须重新请求赔率，禁止沿用上一轮缓存。
+        refresh = await _autoUpdateTick(true);
+      } finally {
+        localStorage.setItem('fp_autoUpdate', '0');
+      }
+      // _saveFetchData/saveHist 内部原本是 fire-and-forget；多场并发写可能后完成的旧 payload 覆盖新 payload。
+      // 等前面的请求收尾，再串行写一次本轮最终全集，随后 run.js 仍会从云端轮询复核。
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      const cloudWrite = {
+        fetchData: await _sbWrite('fp_fetchData', _batchFetchedData),
+        history: await _sbWrite('fp_hist5', loadHist()),
+        model: await _sbWrite('fp_v5', M)
+      };
+      return { swept, targetKeys, refresh: refresh || null, cloudWrite, empty: false };
+    }, generationId);
+
+    console.log('赛程扫描:', pageResult.swept, '场；本轮候选:', pageResult.targetKeys.length, '场');
+    console.log('页面刷新结果:', JSON.stringify(pageResult.refresh));
+  } catch (error) {
+    writeArtifact({
+      targetKeys: pageResult && pageResult.targetKeys || [],
+      pageResult,
+      error: error.message || String(error)
+    });
+    throw error;
   } finally {
     await browser.close();
   }
-  console.log('✅ 完成：预测已写入云端 Supabase。');
-})().catch(e => { console.error('❌ 预测运行失败:', e); process.exit(1); });
+
+  const result = await waitForCloudAudit({
+    generationId,
+    targetKeys: pageResult.targetKeys,
+    startedAt
+  });
+  writeArtifact({ targetKeys: pageResult.targetKeys, pageResult, ok: result.ok, audit: result });
+
+  if (!result.ok) {
+    for (const error of result.errors.slice(0, 50)) {
+      console.error(`[审计失败] ${error.code}${error.key ? ` ${error.key}` : ''}: ${error.detail}`);
+    }
+    throw new Error('本轮市场刷新/预测未通过 freshness 审计，已阻止后续价值推送');
+  }
+  if (result.empty) console.log('✅ 当前 36 小时内没有候选比赛，本轮成功空跑。');
+  else console.log(`✅ 完成：${result.validCount} 场绑定本轮最新盘口赔率并生成预测；${result.blockedCount} 场因无盘/源过期等明确拦截，不出预测和推荐。`);
+})().catch(error => {
+  console.error('❌ 后台刷新失败:', error.message || error);
+  process.exitCode = 1;
+});

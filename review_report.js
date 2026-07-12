@@ -170,6 +170,13 @@ function marketLabel(market) {
   return '亚盘';
 }
 
+// 系统只能审计自己发出信号时记录的赔率，无法获取用户真实成交价。
+// 因此复盘/ROI 必须只使用 b.odds；历史记录缺少该字段时不做任何默认赔率补算。
+function recordedPushOdds(b) {
+  const odds = Number(b && b.odds);
+  return Number.isFinite(odds) && odds > 1 ? odds : null;
+}
+
 function summarizeMarketDirections(hist) {
   const done = (hist || []).filter(r => r && r.status === 'done' && r.hg != null && r.ag != null);
   const ah = { all: emptyStats(), byConf: {}, byLine: {}, byLeague: {} };
@@ -199,15 +206,17 @@ function summarizeMarketDirections(hist) {
 }
 
 function summarizeValueBets(valueBets, hist) {
-  const value = { all: emptyStats(), byMarket: {}, byEv: {}, byTime: {}, byConf: {}, byLine: {}, byLeague: {}, byClv: {}, clv: { n: 0, betterLine: 0, betterOdds: 0, missingCloseOdds: 0 }, missingActualOdds: 0, errors: {}, recent: [] };
+  const value = { all: emptyStats(), byMarket: {}, byEv: {}, byTime: {}, byConf: {}, byLine: {}, byLeague: {}, byClv: {}, clv: { n: 0, oddsCompared: 0, betterLine: 0, betterOdds: 0, missingCloseOdds: 0 }, missingPushOdds: 0, oddsBasis: 'push-time-recorded', errors: {}, recent: [] };
   for (const b of valueBets || []) {
     // 用字段拼 key 匹配历史(不用 b.key):观察注的 key 带"|市场"后缀,直接比对会永远匹配不上
     const r = findHistByKey(hist, `${b.h}|${b.a}|${b.md || ''}`);
     const market = b.market || 'AH';
-    const odds = +(b.actualOdds || b.odds || 2);
-    if (!b.actualOdds) value.missingActualOdds++;
+    const odds = recordedPushOdds(b);
+    if (odds == null) value.missingPushOdds++;
     const stake = +(b.stake || 1);
-    const grade = market === '1X2'
+    const grade = odds == null
+      ? { pending: true, reason: 'push_odds_missing' }
+      : market === '1X2'
       ? grade1x2({ side: b.betSide, odds, stake }, r)
       : (market === 'EH'
         ? gradeEh({ side: b.betSide, line: b.line, odds, stake }, r)
@@ -233,8 +242,9 @@ function summarizeValueBets(valueBets, hist) {
       if (recSideLine > closeSideLine + 0.001) value.clv.betterLine++;
       clvBucket = recSideLine > closeSideLine + 0.001 ? '拿到更好线' : (recSideLine < closeSideLine - 0.001 ? '盘口反向(更差线)' : '线持平');
       const closeOdds = b.betSide === 'home' ? closeSnap.ahOddsHome : closeSnap.ahOddsAway;
-      if (closeOdds != null) {
-        if (+b.odds > +closeOdds + 0.001) value.clv.betterOdds++;
+      if (odds != null && closeOdds != null) {
+        value.clv.oddsCompared++;
+        if (odds > +closeOdds + 0.001) value.clv.betterOdds++;
       } else value.clv.missingCloseOdds++;
     } else if (market === 'AH') {
       const cv = closeVersion(r, b.ko);
@@ -244,8 +254,9 @@ function summarizeValueBets(valueBets, hist) {
         const closeSideLine = b.betSide === 'home' ? +cv.ahRec.line : -cv.ahRec.line;
         if (recSideLine > closeSideLine + 0.001) value.clv.betterLine++;
         clvBucket = recSideLine > closeSideLine + 0.001 ? '拿到更好线' : (recSideLine < closeSideLine - 0.001 ? '盘口反向(更差线)' : '线持平');
-        if (cv.ahRec.side === b.betSide && cv.ahRec.odds != null) {
-          if (+b.odds > +cv.ahRec.odds + 0.001) value.clv.betterOdds++;
+        if (odds != null && cv.ahRec.side === b.betSide && cv.ahRec.odds != null) {
+          value.clv.oddsCompared++;
+          if (odds > +cv.ahRec.odds + 0.001) value.clv.betterOdds++;
         } else value.clv.missingCloseOdds++;
       }
     }
@@ -275,10 +286,10 @@ function summarizeValueBets(valueBets, hist) {
           ? `${b.side || (b.betSide === 'home' ? b.h : (b.betSide === 'away' ? b.a : '让平'))}(${b.line})`
           : `${b.betSide === 'home' ? b.h : b.a} ${b.betSide === 'home' ? b.line : -b.line}`),
       ev: b.ev,
-      recommendedOdds: b.odds,
-      actualOdds: b.actualOdds || null,
+      pushOdds: odds,
+      oddsBasis: 'push-time-recorded',
       score: r && r.status === 'done' ? `${r.hg}-${r.ag}` : 'pending',
-      result: grade.label || 'pending',
+      result: grade.label || (grade.reason || 'pending'),
       profit: grade.profit != null ? +grade.profit.toFixed(2) : null
     });
   }
@@ -291,8 +302,9 @@ function summarizeValueBets(valueBets, hist) {
     byLine: finalizeMap(value.byLine),
     byLeague: finalizeMap(value.byLeague),
     byClv: finalizeMap(value.byClv),
-    clv: { ...value.clv, betterLineRate: pct(value.clv.betterLine, value.clv.n, 1), betterOddsRate: pct(value.clv.betterOdds, value.clv.n - value.clv.missingCloseOdds, 1) },
-    missingActualOdds: value.missingActualOdds,
+    clv: { ...value.clv, betterLineRate: pct(value.clv.betterLine, value.clv.n, 1), betterOddsRate: pct(value.clv.betterOdds, value.clv.oddsCompared, 1) },
+    missingPushOdds: value.missingPushOdds,
+    oddsBasis: value.oddsBasis,
     errors: value.errors,
     recent: value.recent.slice(-20)
   };
@@ -301,23 +313,26 @@ function summarizeValueBets(valueBets, hist) {
 // 实验A汇总:首发核验的"虚拟否决组 vs 维持组"真实ROI对比(fp_lineupChecks × fp_valueBets × 赛果)
 function summarizeLineupChecks(checks, valueBets, hist) {
   const byKey = {}; (valueBets || []).forEach(b => { if (b) byKey[b.key] = b; });
-  const out = { recorded: (checks || []).length, checked: 0, noLineup: 0, pendingResult: 0, veto: emptyStats(), keep: emptyStats(), recent: [] };
+  const out = { recorded: (checks || []).length, checked: 0, noLineup: 0, pendingResult: 0, missingPushOdds: 0, oddsBasis: 'push-time-recorded', veto: emptyStats(), keep: emptyStats(), recent: [] };
   for (const c of checks || []) {
     if (!c) continue;
     if (!c.ok) { out.noLineup++; continue; }
     const b = byKey[c.key]; if (!b) continue;
     out.checked++;
     const r = findHistByKey(hist, `${b.h}|${b.a}|${b.md || ''}`);
-    const odds = +(b.actualOdds || b.odds || 2), stake = +(b.stake || 1);
+    const odds = recordedPushOdds(b), stake = +(b.stake || 1);
     const market = b.market || 'AH';
-    const grade = market === '1X2'
+    if (odds == null) out.missingPushOdds++;
+    const grade = odds == null
+      ? { pending: true, reason: 'push_odds_missing' }
+      : market === '1X2'
       ? grade1x2({ side: b.betSide, odds, stake }, r)
       : (market === 'EH'
         ? gradeEh({ side: b.betSide, line: b.line, odds, stake }, r)
         : gradeAh({ side: b.betSide, line: b.line, odds, stake }, r));
     if (grade.pending) out.pendingResult++;
     addGrade(c.verdict === 'veto' ? out.veto : out.keep, grade);
-    out.recent.push({ match: `${b.h} vs ${b.a}`, verdict: c.verdict, reason: c.vetoReason || '', starOut: c.starOut ?? null, dLine: c.againstDelta ?? null, result: grade.label || 'pending' });
+    out.recent.push({ match: `${b.h} vs ${b.a}`, verdict: c.verdict, reason: c.vetoReason || '', starOut: c.starOut ?? null, dLine: c.againstDelta ?? null, pushOdds: odds, oddsBasis: 'push-time-recorded', result: grade.label || (grade.reason || 'pending') });
   }
   out.veto = finalizeStats(out.veto);
   out.keep = finalizeStats(out.keep);
@@ -403,7 +418,7 @@ function text(report) {
     `卖号复盘 ${report.generatedAtBJ}`,
     `胜平负 ${s.oneX2.hitRate ?? '—'}%，号单 ${s.sellOnly.settled}场，命中 ${s.sellOnly.hitRate ?? '—'}%，估算ROI ${s.sellOnly.roi ?? '—'}%`,
     `让球方向 ${m.ah.all.settled}场 ${m.ah.all.hitRate ?? '—'}%，大小球 ${m.ou.all.settled}场 ${m.ou.all.hitRate ?? '—'}%`,
-    `价值号 ${v.all.settled}注，命中 ${v.all.hitRate ?? '—'}%，ROI ${v.all.roi ?? '—'}%，CLV更好盘口 ${v.clv.betterLineRate ?? '—'}%`,
+    `价值号 ${v.all.settled}注，命中 ${v.all.hitRate ?? '—'}%，ROI ${v.all.roi ?? '—'}%（按推送时记录赔率），CLV更好盘口 ${v.clv.betterLineRate ?? '—'}%${v.missingPushOdds ? `，缺推送赔率 ${v.missingPushOdds}注未计ROI` : ''}`,
     `观察盘(未下注) ${(report.watch && report.watch.all.settled) || 0}注，命中 ${(report.watch && report.watch.all.hitRate) ?? '—'}%，ROI ${(report.watch && report.watch.all.roi) ?? '—'}%`,
     (e => e && e.checked ? `首发实验：否决 ${e.veto.settled}注ROI ${e.veto.roi ?? '—'}% vs 维持 ${e.keep.settled}注ROI ${e.keep.roi ?? '—'}%` : '首发实验：暂无核验样本')(report.experiments && report.experiments.lineupCheck),
     `✅可下 ${s.tiers.go.settled}场 ${s.tiers.go.hitRate ?? '—'}%，🟡轻仓 ${s.tiers.light.settled}场 ${s.tiers.light.hitRate ?? '—'}%，🔴观望 ${s.tiers.skip.settled}场`,
@@ -411,7 +426,7 @@ function text(report) {
   ].join('\n');
 }
 
-(async () => {
+async function main() {
   const [hist, valueBetsRaw, watchBetsRaw, lineupChecksRaw] = await Promise.all([sbGet('fp_hist5'), sbGet('fp_valueBets'), sbGet('fp_watchBets'), sbGet('fp_lineupChecks')]);
   if (!Array.isArray(hist)) throw new Error('fp_hist5 不是数组，无法复盘');
   const valueBets = Array.isArray(valueBetsRaw) ? valueBetsRaw : [];
@@ -422,7 +437,7 @@ function text(report) {
   const value = summarizeValueBets(valueBets, hist);
   const watch = summarizeValueBets(watchBets, hist); // 观察盘(1X2/EH,未下注)复用同一套结算/分组逻辑,平注1单位口径
   const report = {
-    version: 3,
+    version: 4,
     type: 'sell-signal-review',
     generatedAt: new Date().toISOString(),
     generatedAtBJ: bjNow(),
@@ -438,4 +453,15 @@ function text(report) {
   console.log(text(report));
   console.log('已写入 fp_sellReviewReport');
   if (SEND_BARK && BARK) console.log(await bark('足球卖号复盘', text(report)) ? '已推送 Bark 卖号复盘' : 'Bark 卖号复盘推送失败');
-})().catch(e => { console.error(e); process.exit(1); });
+}
+
+if (require.main === module) {
+  main().catch(e => { console.error(e); process.exit(1); });
+}
+
+module.exports = {
+  recordedPushOdds,
+  summarizeValueBets,
+  summarizeLineupChecks,
+  text
+};

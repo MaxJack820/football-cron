@@ -41,19 +41,31 @@ jobs:
           npm init -y
           npm i playwright@${{ env.PW_VERSION }}
           npx playwright install --with-deps chromium
+      - name: 测试盘口新鲜度门禁
+        # football_new/profit_value 的 DOM 契约测试依赖前端源码，保留在本地全量回归；
+        # 此部署仓库只运行能在纯后端 checkout 中独立执行的测试。
+        run: node --test test/refresh_audit.test.js test/review_report.test.js push_value.test.js
       - name: 运行一次预测
         run: node run.js
         env:
           AF_KEY: ${{ secrets.AF_KEY }}
-      # ↓↓↓ 价值号推送:跟着这条可靠触发一起跑(预测刚写完云端→读最新数据推送)。
-      # 即使上面预测步骤失败也照推(if: always),因为它独立读云端。脚本内部自带北京12:00–05:00时间窗+EV≥8%+去重+每日封顶。
+          SB_KEY: ${{ secrets.SB_KEY }}
+          REFRESH_AUDIT_FILE: .refresh-audit.json
+      # 二次从云端复核，防止页面刚写完后又被其它旧标签覆盖；失败会直接阻止下一步推送。
+      - name: 审计本轮最新盘口与预测绑定
+        run: node refresh_audit.js --artifact .refresh-audit.json
+        env:
+          SB_KEY: ${{ secrets.SB_KEY }}
+          REFRESH_AUDIT_FILE: .refresh-audit.json
+      # 价值号只能跟在“本轮刷新 + 云端二次审计”都成功之后运行。
+      # 不再使用 if:always；抓盘失败、源赔率超过15分钟、盘口赔率串代时一律不推。
       - name: 推送价值号(Bark)
-        if: always()
         run: node push_value.js
         continue-on-error: true
         env:
           BARK_KEY: ${{ secrets.BARK_KEY }}
-          # SB_KEY 可不填(脚本内置 publishable)
+          SB_KEY: ${{ secrets.SB_KEY }}
+          REFRESH_AUDIT_FILE: .refresh-audit.json
 
       - name: 自动结算已完赛赛果
         if: always()

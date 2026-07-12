@@ -11,7 +11,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: 推送价值号
+      # 独立工作流没有 run.js 生成的本轮审计产物，因此只允许 DRY_RUN 诊断，绝不真实推 Bark。
+      - name: 价值号只读诊断（不推送）
         run: node push_value.js
         env:
-          BARK_KEY: ${{ secrets.BARK_KEY }}
+          DRY_RUN: '1'
