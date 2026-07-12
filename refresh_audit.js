@@ -10,13 +10,15 @@ const SB_KEY = process.env.SB_KEY || 'sb_publishable_PHn7mHo7mUgQBTD9GFLBaA_u8tj
 const DEFAULT_SOURCE_MAX_AGE_MS = 15 * 60 * 1000;
 const DEFAULT_CLOCK_SKEW_MS = 60 * 1000;
 
-// 按距开赛分级的盘口新鲜度门禁,必须与前端 football_new.html 的 MARKET_FRESHNESS_TIERS 完全一致。
-// API-Football 赛前赔率约每3-4h才刷一次,远期场源时间戳天然偏旧;一刀切15min会误拦有效快照。
-// kickoffMs 由快照对象携带(前端 _buildMarketSnapshot 写入,不进 snapshotId 哈希),各验证器自行读取。
+// 盘口新鲜度门禁,必须与前端 football_new.html 的 MARKET_FRESHNESS_TIERS 完全一致。
+// 实测(260713):API-Football 赛前赔率每4小时批量更新一次(00/04/08/12/16点整),不分远期近期。
+// 故 sourceMaxAgeMs 三档统一放宽到 5h(4h批次+缓冲),否则批次之间全场判 source_stale、出不了号。
+// TTL 仍分级(仅控制页面重抓频率,与数据源新鲜度无关)。kickoffMs 由快照携带,不进 snapshotId 哈希。
+const _SRC_MAX_AGE_MS = 5 * 60 * 60 * 1000;
 const MARKET_FRESHNESS_TIERS = [
-  { maxHoursToKo: 1, sourceMaxAgeMs: 15 * 60 * 1000, ttlMs: 20 * 60 * 1000 },
-  { maxHoursToKo: 6, sourceMaxAgeMs: 60 * 60 * 1000, ttlMs: 45 * 60 * 1000 },
-  { maxHoursToKo: Infinity, sourceMaxAgeMs: 4 * 60 * 60 * 1000, ttlMs: 90 * 60 * 1000 }
+  { maxHoursToKo: 1, sourceMaxAgeMs: _SRC_MAX_AGE_MS, ttlMs: 20 * 60 * 1000 },
+  { maxHoursToKo: 6, sourceMaxAgeMs: _SRC_MAX_AGE_MS, ttlMs: 45 * 60 * 1000 },
+  { maxHoursToKo: Infinity, sourceMaxAgeMs: _SRC_MAX_AGE_MS, ttlMs: 90 * 60 * 1000 }
 ];
 // 无法判定距开赛(缺 kickoffMs)时保守取最严一档。sourceMaxAgeMs 显式传入(options)时优先,用于测试/环境覆盖。
 function marketTier(kickoffMs, atMs) {
