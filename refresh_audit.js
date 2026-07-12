@@ -10,6 +10,23 @@ const SB_KEY = process.env.SB_KEY || 'sb_publishable_PHn7mHo7mUgQBTD9GFLBaA_u8tj
 const DEFAULT_SOURCE_MAX_AGE_MS = 15 * 60 * 1000;
 const DEFAULT_CLOCK_SKEW_MS = 60 * 1000;
 
+// 按距开赛分级的盘口新鲜度门禁,必须与前端 football_new.html 的 MARKET_FRESHNESS_TIERS 完全一致。
+// API-Football 赛前赔率约每3-4h才刷一次,远期场源时间戳天然偏旧;一刀切15min会误拦有效快照。
+// kickoffMs 由快照对象携带(前端 _buildMarketSnapshot 写入,不进 snapshotId 哈希),各验证器自行读取。
+const MARKET_FRESHNESS_TIERS = [
+  { maxHoursToKo: 1, sourceMaxAgeMs: 15 * 60 * 1000, ttlMs: 20 * 60 * 1000 },
+  { maxHoursToKo: 6, sourceMaxAgeMs: 60 * 60 * 1000, ttlMs: 45 * 60 * 1000 },
+  { maxHoursToKo: Infinity, sourceMaxAgeMs: 4 * 60 * 60 * 1000, ttlMs: 90 * 60 * 1000 }
+];
+// 无法判定距开赛(缺 kickoffMs)时保守取最严一档。sourceMaxAgeMs 显式传入(options)时优先,用于测试/环境覆盖。
+function marketTier(kickoffMs, atMs) {
+  const koMs = Number(kickoffMs);
+  if (!Number.isFinite(koMs)) return MARKET_FRESHNESS_TIERS[0];
+  const hrs = (koMs - (Number.isFinite(atMs) ? atMs : Date.now())) / 3600e3;
+  for (const t of MARKET_FRESHNESS_TIERS) if (hrs <= t.maxHoursToKo) return t;
+  return MARKET_FRESHNESS_TIERS[MARKET_FRESHNESS_TIERS.length - 1];
+}
+
 function parseTs(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value > 0 && value < 1e12 ? value * 1000 : value;
   if (/^\d+(?:\.\d+)?$/.test(String(value || '').trim())) {
@@ -157,7 +174,9 @@ function validateMarketSnapshot(snapshot, options = {}) {
   const nowMs = options.nowMs == null ? Date.now() : options.nowMs;
   const startedMs = options.startedMs == null ? null : options.startedMs;
   const generationId = options.generationId || '';
-  const sourceMaxAgeMs = options.sourceMaxAgeMs || DEFAULT_SOURCE_MAX_AGE_MS;
+  // 分级门禁:按快照携带的 kickoffMs 选档;显式传入 sourceMaxAgeMs(测试/环境覆盖)时优先。
+  const tier = marketTier(snapshot && snapshot.kickoffMs, nowMs);
+  const sourceMaxAgeMs = options.sourceMaxAgeMs || tier.sourceMaxAgeMs;
   const clockSkewMs = options.clockSkewMs || DEFAULT_CLOCK_SKEW_MS;
   const errors = [];
   const add = (code, detail) => errors.push({ code, detail });
