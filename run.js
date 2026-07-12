@@ -27,7 +27,7 @@ const CLOUD_AUDIT_WAIT_MS = Number(process.env.FP_CLOUD_AUDIT_WAIT_MS) || 120000
 const CLOUD_AUDIT_POLL_MS = 8000;
 // ⚠️ 必须 >= 线上页面 build 号。分级新鲜度依赖页面把 kickoffMs 写进快照;若线上是旧页面(无 kickoffMs),
 // 快照会落到最严档(15min)→远期场仍被误拦。所以部署顺序:先传新页面到 Cloudflare,再让后端跑。
-const MIN_PAGE_BUILD = process.env.FP_MIN_PAGE_BUILD || '260712.1';
+const MIN_PAGE_BUILD = process.env.FP_MIN_PAGE_BUILD || '260712.2';
 const generationId = process.env.FP_REFRESH_GENERATION_ID || `refresh-${new Date().toISOString().replace(/[-:.TZ]/g, '')}-${crypto.randomUUID().slice(0, 8)}`;
 const startedAt = new Date().toISOString();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -92,7 +92,7 @@ async function waitForCloudAudit(context) {
 
 (async () => {
   console.log('本轮 generation:', generationId);
-  console.log('源赔率最大允许年龄:', SOURCE_MAX_AGE_MS ? `${SOURCE_MAX_AGE_MS / 60000} 分钟(环境覆盖)` : '按距开赛分级(<1h→15min / 1-6h→60min / >6h→4h)');
+  console.log('源赔率最大允许年龄:', SOURCE_MAX_AGE_MS ? `${SOURCE_MAX_AGE_MS / 60000} 分钟(环境覆盖)` : '源龄上限 5h(对齐数据源4h批次周期);TTL按距开赛分级 20/45/90min');
   const browser = await chromium.launch();
   let pageResult = null;
   let apiProxyStats = null;
