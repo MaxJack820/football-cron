@@ -21,6 +21,7 @@ if (!AF_KEY) {
     await ctx.addInitScript(() => {
       localStorage.setItem('fp_apiFootballKey', '__server_proxy__');
       localStorage.setItem('fp_autoUpdate', '0');
+      localStorage.setItem('fp_backendMarketOnly', '1');
     });
 
     const page = await ctx.newPage();

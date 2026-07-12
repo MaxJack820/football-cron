@@ -24,7 +24,7 @@ async function installApiFootballProxy(context, { apiKey, fetchImpl = globalThis
   if (!apiKey) throw new Error('API-Football key missing');
   if (typeof fetchImpl !== 'function') throw new Error('Node fetch unavailable');
 
-  const stats = { total: 0, options: 0, upstreamOk: 0, upstreamErrors: 0, apiErrors: 0, statusCounts: {} };
+  const stats = { total: 0, options: 0, upstreamOk: 0, upstreamErrors: 0, apiErrors: 0, statusCounts: {}, endpointCounts: {} };
   await context.route(`${API_ORIGIN}/**`, async route => {
     const request = route.request();
     const method = String(request.method()).toUpperCase();
@@ -42,6 +42,7 @@ async function installApiFootballProxy(context, { apiKey, fetchImpl = globalThis
         await route.fulfill({ status: 405, headers: { ...corsHeaders(origin), 'content-type': 'application/json' }, body: JSON.stringify({ errors: { proxy: 'method_or_origin_not_allowed' } }) });
         return;
       }
+      stats.endpointCounts[url.pathname] = (stats.endpointCounts[url.pathname] || 0) + 1;
       const response = await fetchImpl(url.toString(), {
         method: 'GET',
         headers: { 'accept': 'application/json', 'x-apisports-key': apiKey },

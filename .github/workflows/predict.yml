@@ -65,9 +65,3 @@ jobs:
           BARK_KEY: ${{ secrets.BARK_KEY }}
           SB_KEY: ${{ secrets.SB_KEY }}
           REFRESH_AUDIT_FILE: .refresh-audit.json
-
-      - name: 自动结算已完赛赛果
-        if: always()
-        run: node settle_results.js
-        env:
-          AF_KEY: ${{ secrets.AF_KEY }}

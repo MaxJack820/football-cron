@@ -25,7 +25,7 @@ const ARTIFACT_PATH = process.env.REFRESH_AUDIT_FILE || '.refresh-audit.json';
 const SOURCE_MAX_AGE_MS = Number(process.env.FP_SOURCE_MAX_AGE_MS) || DEFAULT_SOURCE_MAX_AGE_MS;
 const CLOUD_AUDIT_WAIT_MS = Number(process.env.FP_CLOUD_AUDIT_WAIT_MS) || 120000;
 const CLOUD_AUDIT_POLL_MS = 8000;
-const MIN_PAGE_BUILD = process.env.FP_MIN_PAGE_BUILD || '260711.5';
+const MIN_PAGE_BUILD = process.env.FP_MIN_PAGE_BUILD || '260711.6';
 const generationId = process.env.FP_REFRESH_GENERATION_ID || `refresh-${new Date().toISOString().replace(/[-:.TZ]/g, '')}-${crypto.randomUUID().slice(0, 8)}`;
 const startedAt = new Date().toISOString();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -100,6 +100,7 @@ async function waitForCloudAudit(context) {
     await context.addInitScript(({ generation }) => {
       // 页面只需知道后台数据源可用；真实 key 留在 Node 侧代理，绝不进入 DOM/localStorage。
       localStorage.setItem('fp_apiFootballKey', '__server_proxy__');
+      localStorage.setItem('fp_backendMarketOnly', '1');
       // 禁掉页面 8 秒后的自由运行；由 run.js 明确地“扫赛程 -> 定目标 -> 强制抓盘 -> 预测”。
       localStorage.setItem('fp_autoUpdate', '0');
       localStorage.setItem('fp_refreshGenerationId', generation);
