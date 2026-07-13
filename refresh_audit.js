@@ -61,6 +61,43 @@ function computeMarketSnapshotId(snapshot) {
   return `mkt-${marketHash(JSON.stringify(marketSnapshotPayload(snapshot)))}`;
 }
 
+// 盘口指纹 marketFp:只含"盘口实质内容"(fixtureId + 三市场的线与赔率),
+// 【不含】fetchedAt / generationId / expiresAt / sourceUpdatedAt —— 这些每轮抓盘必变的字段进哈希会导致
+// "盘口没变、指纹每轮变",从而让预测↔盘口的绑定天然对不上(旧 snapshotId 的病根)。
+// 同一场盘口没变 → marketFp 跨轮稳定 → 预测与快照天然绑定;源真出新盘(线/赔率变)→ marketFp 随之变。
+// 防旧盘由独立的源龄 5h 门禁承担,不靠指纹。字段顺序必须与前端命中版/价值版、push_value 逐字节一致。
+function marketFpPayload(snapshot) {
+  const markets = snapshot && snapshot.markets || {};
+  const win = markets.win || {};
+  const ah = markets.ah || {};
+  const main = ah.mainLine;
+  const ou = markets.ou;
+  return {
+    fixtureId: snapshot && snapshot.fixtureId != null ? String(snapshot.fixtureId) : null,
+    markets: {
+      win: { home: win.home, draw: win.draw, away: win.away },
+      ah: {
+        line: ah.line, home: ah.home, away: ah.away,
+        mainLine: main == null ? null : { line: main.line, votes: main.votes, sharpVotes: main.sharpVotes },
+        oddsSource: ah.oddsSource,
+        mainLineSource: ah.mainLineSource
+      },
+      ou: ou == null ? null : { line: ou.line, over: ou.over, under: ou.under }
+    }
+  };
+}
+
+function computeMarketFp(snapshot) {
+  return `fp-${marketHash(JSON.stringify(marketFpPayload(snapshot)))}`;
+}
+
+// 取或现算:存量快照/预测无 marketFp 字段时就地现算(算法只依赖 markets+fixtureId,旧数据都在),
+// 结果与新写入逐字节一致 → 存量记录零迁移平滑绑定。
+function fpOf(x) {
+  if (!x) return null;
+  return x.marketFp || computeMarketFp(x);
+}
+
 function validateBlockedSnapshot(snapshot, record, options = {}) {
   const nowMs = options.nowMs == null ? Date.now() : options.nowMs;
   const startedMs = options.startedMs == null ? null : options.startedMs;
@@ -177,6 +214,7 @@ function validateMarketSnapshot(snapshot, options = {}) {
   if (!snapshot.fixtureId) add('fixture_id_missing', 'fixtureId 缺失');
   if (!snapshot.snapshotId || typeof snapshot.snapshotId !== 'string') add('snapshot_id_missing', 'snapshotId 缺失');
   else if (snapshot.snapshotId !== computeMarketSnapshotId(snapshot)) add('snapshot_id_content_mismatch', 'snapshotId 与盘口/源时间内容不一致');
+  if (snapshot.marketFp && snapshot.marketFp !== computeMarketFp(snapshot)) add('snapshot_content_mismatch', 'marketFp 与盘口内容不一致');
   if (!snapshot.generationId || snapshot.generationId !== generationId) {
     add('generation_mismatch', `snapshot=${snapshot.generationId || ''}, expected=${generationId}`);
   }
@@ -275,10 +313,11 @@ function predictionMatchesSnapshot(version, snapshot) {
 function predictionCarriesSnapshot(version, snapshot) {
   const copy = version && version.marketSnapshot;
   if (!copy || !snapshot) return false;
-  if (copy.snapshotId !== snapshot.snapshotId || copy.generationId !== snapshot.generationId) return false;
+  // 只校验"预测确实携带一份【真实有效】的盘口快照,且盘口内容与本轮一致"——用于防伪造/防串料。
+  // 【不再】比对 snapshotId/generationId/fetchedAt/expiresAt 等每轮抓盘必变的易变字段:沿用上一轮锁定的
+  // 预测(盘口未变、odds 相同)其内嵌快照来自上一轮,这些易变字段本就不同,比对它们只会误杀良性 carry-over。
+  // 盘口实质一致由下方 markets 逐项 + marketFp 保证,odds 一致由 predictionMatchesSnapshot 保证。
   if (String(copy.fixtureId) !== String(snapshot.fixtureId) || copy.source !== snapshot.source) return false;
-  if (parseTs(copy.sourceUpdatedAt) !== parseTs(snapshot.sourceUpdatedAt)) return false;
-  if (parseTs(copy.fetchedAt) !== parseTs(snapshot.fetchedAt) || parseTs(copy.expiresAt) !== parseTs(snapshot.expiresAt)) return false;
   if (copy.valid !== true || copy.mainLineVerified !== true) return false;
   const c = copy.markets || {}, s = snapshot.markets || {};
   if (!c.win || !s.win || !sameNumber(c.win.home, s.win.home) || !sameNumber(c.win.draw, s.win.draw) || !sameNumber(c.win.away, s.win.away)) return false;
@@ -379,43 +418,46 @@ function auditGeneration({ fetchData, history, generationId, targetKeys, started
   }
 
   let predictionCount = 0;
+  const sameMatch = (record, identity) => !!(record && record.status === 'pending'
+    && identity && record.h === identity.home && record.a === identity.away);
+  // 预测 version 的盘口指纹:优先取本轮写入的 version.marketFp;存量(旧页面锁定、无 marketFp)则从其内嵌
+  // marketSnapshot 现算(算法只依赖 markets+fixtureId,旧数据都在),结果与新写入逐字节一致。
+  const versionFp = (v) => v && (v.marketFp || (v.marketSnapshot ? computeMarketFp(v.marketSnapshot) : null));
   for (const item of snapshots.filter(x => x.valid)) {
     const snapshot = item.snapshot;
     const identity = splitMatchKey(item.key);
-    const matching = hist.filter(record => {
-      if (!record || record.status !== 'pending') return false;
-      if (!identity || record.h !== identity.home || record.a !== identity.away) return false;
+    const snapFp = fpOf(snapshot);
+    // 绑定判据 = 盘口指纹一致(替代易变 snapshotId)。因 marketFp 跨轮稳定,"盘口没变、沿用已锁定预测"
+    // 天然落进这条(不再需要旧 Tier2 补丁);盘口线/赔率一变 → 指纹变 → 落到下方 link_invalid,真问题仍拦死。
+    // 容忍重复/僵尸 pending:只要有【至少 1 条】指纹绑定即取其一做完整校验。
+    const bound = hist.filter(record => {
+      if (!sameMatch(record, identity)) return false;
       const v = latestVersion(record);
-      return v && v.marketSnapshotId === snapshot.snapshotId;
+      return v && versionFp(v) === snapFp;
     });
-    // 容忍重复 pending:只要有【至少 1 条】预测正确绑定本轮快照即算通过,取其一做后续校验。
-    // 旧逻辑要求"恰好 1 条",遇到历史遗留的重复/僵尸 pending(同名多条)会让整场 link_invalid → 整轮 FAIL。
-    // 0 条才是真问题(快照有效但没有任何预测绑定它)。
-    if (matching.length < 1) {
-      add('prediction_snapshot_link_invalid', item.key, `关联到 0 条 pending 预测`);
+    if (bound.length >= 1) {
+      const version = latestVersion(bound[0]);
+      // 【不再】要求 version.generationId===本轮 generationId:沿用上一轮锁定的预测(盘口未变)其 generationId
+      // 本就是上一轮的,硬比会误杀。绑定正确性已由 marketFp 指纹 + 下面两道内容校验保证。
+      if (!predictionCarriesSnapshot(version, snapshot)) {
+        add('prediction_snapshot_copy_mismatch', item.key, '预测版本没有携带同一份完整 marketSnapshot');
+        continue;
+      }
+      if (!predictionMatchesSnapshot(version, snapshot)) {
+        add('prediction_odds_mismatch', item.key, '预测 oddsSnap 与 marketSnapshot 不是同一盘口赔率');
+        continue;
+      }
+      // 只防"预测时间来自未来"(时钟异常);【不再】比 predMs < fetchedMs——carry-over 预测本就早于本轮重抓。
+      const predMs = parseTs(version.ts);
+      if (predMs == null || predMs > now + DEFAULT_CLOCK_SKEW_MS) {
+        add('prediction_ts_invalid', item.key, '预测时间缺失或超前于当前时间');
+        continue;
+      }
+      predictionCount++;
       continue;
     }
-    const record = matching[0];
-    const version = latestVersion(record);
-    if (version.generationId !== generationId) {
-      add('prediction_generation_mismatch', item.key, `prediction=${version.generationId || ''}`);
-      continue;
-    }
-    if (!predictionCarriesSnapshot(version, snapshot)) {
-      add('prediction_snapshot_copy_mismatch', item.key, '预测版本没有携带同一份完整 marketSnapshot');
-      continue;
-    }
-    if (!predictionMatchesSnapshot(version, snapshot)) {
-      add('prediction_odds_mismatch', item.key, '预测 oddsSnap 与 marketSnapshot 不是同一盘口赔率');
-      continue;
-    }
-    const predMs = parseTs(version.ts);
-    const fetchedMs = parseTs(snapshot.fetchedAt);
-    if (predMs == null || fetchedMs == null || predMs + DEFAULT_CLOCK_SKEW_MS < fetchedMs || predMs > now + DEFAULT_CLOCK_SKEW_MS) {
-      add('prediction_ts_invalid', item.key, '预测时间早于抓盘或超前于当前时间');
-      continue;
-    }
-    predictionCount++;
+    // 0 条才是真问题(有效快照但没有任何盘口指纹一致的 pending 预测绑定它)。
+    add('prediction_snapshot_link_invalid', item.key, `关联到 0 条 pending 预测`);
   }
 
   const validCount = snapshots.filter(item => item.valid).length;
@@ -498,6 +540,7 @@ async function cli() {
 module.exports = {
   DEFAULT_SOURCE_MAX_AGE_MS,
   computeMarketSnapshotId,
+  computeMarketFp,
   auditCloud,
   auditGeneration,
   formatSummary,
