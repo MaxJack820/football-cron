@@ -27,7 +27,7 @@ const CLOUD_AUDIT_WAIT_MS = Number(process.env.FP_CLOUD_AUDIT_WAIT_MS) || 120000
 const CLOUD_AUDIT_POLL_MS = 8000;
 // ⚠️ 必须 >= 线上页面 build 号。快照链依赖新版页面(写 kickoffMs、canonical snapshotId)。
 // 若线上是旧页面,快照会对不上→全场误拦。部署顺序:先传新页面到 Cloudflare,再让后端跑。
-const MIN_PAGE_BUILD = process.env.FP_MIN_PAGE_BUILD || '260712.6';
+const MIN_PAGE_BUILD = process.env.FP_MIN_PAGE_BUILD || '260713.1';
 const generationId = process.env.FP_REFRESH_GENERATION_ID || `refresh-${new Date().toISOString().replace(/[-:.TZ]/g, '')}-${crypto.randomUUID().slice(0, 8)}`;
 const startedAt = new Date().toISOString();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -55,7 +55,7 @@ function immutableAuditFailure(result) {
   // 这些错误不会因为等待 Supabase 的异步写入而自行恢复，立即失败即可。
   const immutable = new Set([
     'schema_invalid', 'source_invalid', 'fixture_id_missing', 'snapshot_id_missing',
-    'snapshot_id_content_mismatch',
+    'snapshot_id_content_mismatch', 'snapshot_content_mismatch',
     'generation_mismatch', 'snapshot_invalid', 'main_line_unverified',
     'source_ts_missing', 'source_ts_future', 'source_stale', 'fetched_at_missing',
     'fetched_at_future', 'not_fetched_this_run', 'timestamp_order_invalid',
