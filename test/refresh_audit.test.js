@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {
   auditGeneration,
   computeMarketSnapshotId,
+  computeMarketFp,
   validateMarketSnapshot
 } = require('../refresh_audit');
 
@@ -376,4 +377,55 @@ test('blocked 场不能把旧盘口成功时间伪刷新为本轮时间', () => 
   });
   assert.equal(result.ok, false);
   assert.ok(result.errors.some(error => error.code === 'blocked_success_ts_advanced'));
+});
+
+// ── snapshotId 版本错位容忍(marketFp 稳定指纹绑定,替代旧 Tier2 补丁)──
+// 场景:某场首轮已锁定 pending 预测;后续轮盘口未变,前端 savePrediction(force=false) 不覆盖,
+// 预测停在旧 snapshotId/generationId;而本轮快照 snapshotId 因含 fetchedAt 必然变化。
+// 因 marketFp 只含盘口实质(线+赔率),二者指纹相同 → 天然绑定 → 应 PASS(不再需要 carriedOverCount)。
+function carriedPrediction(prevSnap) {
+  return prediction(prevSnap);
+}
+
+test('盘口未变时,沿用上一轮已锁定预测(snapshotId/generationId 版本错位)靠 marketFp 绑定成功,不 FAIL', () => {
+  const current = snapshot(); // 本轮快照
+  // 上一轮同盘口快照:改 generation/时间 → snapshotId 不同,但 win/ah/ou 赔率与本轮完全一致 → marketFp 相同。
+  const prev = snapshot({
+    generationId: 'refresh-20260711-prev',
+    sourceUpdatedAt: '2026-07-11T05:59:00.000Z',
+    fetchedAt: '2026-07-11T05:59:30.000Z',
+    expiresAt: '2026-07-11T07:30:00.000Z'
+  });
+  assert.notEqual(prev.snapshotId, current.snapshotId, '前置条件:两轮 snapshotId 必须不同');
+  assert.equal(computeMarketFp(prev), computeMarketFp(current), '前置条件:盘口未变 → marketFp 必须相同');
+  const result = auditGeneration({
+    fetchData: { [KEY]: fetchRecord(current) },
+    history: [carriedPrediction(prev)],
+    generationId: GEN, targetKeys: [KEY], startedAt: START, nowMs: NOW
+  });
+  assert.equal(result.ok, true, '盘口未变的版本错位不该 FAIL');
+  assert.equal(result.predictionCount, 1);
+  assert.ok(!result.errors.some(e => e.code === 'prediction_snapshot_link_invalid'));
+});
+
+test('沿用旧预测但盘口实质已变(赔率不同)仍必须 FAIL,不能被容忍分支放过', () => {
+  const current = snapshot();
+  // 上一轮快照:snapshotId 不同,且亚盘赔率变了 → 盘口实质不一致。
+  const prevChanged = snapshot({
+    generationId: 'refresh-20260711-prev',
+    fetchedAt: '2026-07-11T05:59:30.000Z',
+    expiresAt: '2026-07-11T07:30:00.000Z',
+    markets: {
+      win: { home: 1.81, draw: 3.6, away: 4.2 },
+      ah: { line: -0.75, home: 2.10, away: 1.78, mainLine: { line: -0.75, votes: 7, sharpVotes: 3 } },
+      ou: { line: 2.75, over: 1.91, under: 1.95 }
+    }
+  });
+  const result = auditGeneration({
+    fetchData: { [KEY]: fetchRecord(current) },
+    history: [carriedPrediction(prevChanged)],
+    generationId: GEN, targetKeys: [KEY], startedAt: START, nowMs: NOW
+  });
+  assert.equal(result.ok, false, '盘口变了却沿用旧预测必须 FAIL');
+  assert.ok(result.errors.some(e => e.code === 'prediction_snapshot_link_invalid'));
 });
