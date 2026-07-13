@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  MARKET_MAX_AGE_MS,
+  marketMaxAgeMs,
   computeMarketSnapshotId,
   validateMarketSnapshot,
   latestModelVersion,
