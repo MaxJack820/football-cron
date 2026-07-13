@@ -11,33 +11,17 @@ const BARK_SERVER = process.env.BARK_SERVER || 'https://api.day.app';
 const DRY = process.env.DRY_RUN === '1';
 
 const EV_MIN = 0.08, STAKE = 50, STAKE_HI = 75, EV_HI = 0.12, DAILY_CAP = 8, MATURE_H = 4;
-// “最新”不是脚本执行时间，而是赔率源时间。页面每 15 分钟刷新一次，默认最多容忍 15 分钟；
-// 即使 expiresAt 尚未到，只要 sourceUpdatedAt/fetchedAt 超龄也一律禁推。
-const _configuredMarketAge = +(process.env.MARKET_MAX_AGE_MIN || 15);
-const MARKET_MAX_AGE_MIN = Math.min(15, Number.isFinite(_configuredMarketAge) && _configuredMarketAge > 0 ? _configuredMarketAge : 15);
-const MARKET_MAX_AGE_MS = MARKET_MAX_AGE_MIN * 60e3;
 // 源龄门禁,必须与前端 MARKET_FRESHNESS_TIERS / refresh_audit 完全一致。
-// 实测(260713):API-Football 赛前赔率每4小时批量更新一次,不分远期近期。源龄上限统一放宽到 5h(4h批次+缓冲),
-// 否则价值号在批次之间几乎永远推不出。若显式设了 MARKET_MAX_AGE_MIN 环境变量,则以该硬顶为上限(取更严者)。
-// kickoffMs 由快照携带(不进 snapshotId 哈希)。
+// 实测(260713):API-Football 赛前赔率每4小时批量更新一次,不分远期近期。源龄上限统一 5h(4h批次+缓冲),
+// 否则价值号在批次之间几乎永远推不出。kickoffMs 由快照携带(不进 snapshotId 哈希)。
 const _SRC_MAX_AGE_MS = 5 * 60 * 60e3;
-const MARKET_FRESHNESS_TIERS = [
-  { maxHoursToKo: 1, sourceMaxAgeMs: _SRC_MAX_AGE_MS },
-  { maxHoursToKo: 6, sourceMaxAgeMs: _SRC_MAX_AGE_MS },
-  { maxHoursToKo: Infinity, sourceMaxAgeMs: _SRC_MAX_AGE_MS }
-];
-const _ageEnvForced = process.env.MARKET_MAX_AGE_MIN != null && Number.isFinite(_configuredMarketAge) && _configuredMarketAge > 0;
-function marketMaxAgeMs(snapshot, atMs) {
-  const koMs = Number(snapshot && snapshot.kickoffMs);
-  let tierMs;
-  if (!Number.isFinite(koMs)) tierMs = MARKET_FRESHNESS_TIERS[0].sourceMaxAgeMs;
-  else {
-    const hrs = (koMs - (Number.isFinite(atMs) ? atMs : Date.now())) / 3600e3;
-    const t = MARKET_FRESHNESS_TIERS.find(x => hrs <= x.maxHoursToKo) || MARKET_FRESHNESS_TIERS[MARKET_FRESHNESS_TIERS.length - 1];
-    tierMs = t.sourceMaxAgeMs;
-  }
-  // 显式设了环境上限时,不允许分级放宽超过它(取更严者)——保留运维手动收紧推送的能力。
-  return _ageEnvForced ? Math.min(tierMs, MARKET_MAX_AGE_MS) : tierMs;
+// 可选环境覆盖 MARKET_MAX_AGE_MIN:设了就【如实】按该分钟数生效(放宽或收紧都直观),不设走默认 5h。
+// 旧代码曾用 Math.min(15,...) 硬顶 15min,导致设任何值都被打回 15min 死档(反直觉陷阱),已移除。
+const _envAgeMin = Number(process.env.MARKET_MAX_AGE_MIN);
+const _envAgeMs = Number.isFinite(_envAgeMin) && _envAgeMin > 0 ? _envAgeMin * 60e3 : null;
+function marketMaxAgeMs() {
+  // 三档源龄同值,不再按 kickoffMs 分级(数据源不分远近、每4h批量更新)。环境变量优先。
+  return _envAgeMs || _SRC_MAX_AGE_MS;
 }
 const CLOCK_SKEW_MS = 2 * 60e3;
 const ENABLE_AH_PUSH = process.env.ENABLE_AH_PUSH !== '0';
@@ -256,7 +240,7 @@ function validateMarketSnapshot(fdo, now = Date.now()) {
   if (sourceUpdatedAt > now + CLOCK_SKEW_MS || fetchedAt > now + CLOCK_SKEW_MS) return { ok: false, reason: 'snapshot-from-future' };
   if (fetchedAt + CLOCK_SKEW_MS < sourceUpdatedAt) return { ok: false, reason: 'snapshot-ts-order-invalid' };
   if (expiresAt <= now) return { ok: false, reason: 'snapshot-expired' };
-  const _maxAgeMs = marketMaxAgeMs(s, now);
+  const _maxAgeMs = marketMaxAgeMs();
   if (now - sourceUpdatedAt > _maxAgeMs) return { ok: false, reason: 'source-stale' };
   if (now - fetchedAt > _maxAgeMs) return { ok: false, reason: 'fetch-stale' };
 
@@ -308,7 +292,7 @@ function validateMarketSnapshot(fdo, now = Date.now()) {
       expiresAt,
       sourceAgeMs: Math.max(0, now - sourceUpdatedAt),
       fetchAgeMs: Math.max(0, now - fetchedAt),
-      maxAgeMs: MARKET_MAX_AGE_MS
+      maxAgeMs: marketMaxAgeMs()
     }
   };
 }
@@ -360,7 +344,7 @@ function validateModelVersion(v, market, now = Date.now(), ko = null) {
     return { ok: false, reason: 'version-freshness-copy-mismatch' };
   }
   if (sourceUpdatedAt > now + CLOCK_SKEW_MS || fetchedAt > now + CLOCK_SKEW_MS || expiresAt <= now) return { ok: false, reason: 'version-snapshot-expired' };
-  const _vMaxAgeMs = marketMaxAgeMs(vs, now);
+  const _vMaxAgeMs = marketMaxAgeMs();
   if (now - sourceUpdatedAt > _vMaxAgeMs || now - fetchedAt > _vMaxAgeMs) return { ok: false, reason: 'version-snapshot-stale' };
   const vwin = vs.markets && vs.markets.win;
   if (!vwin || !sameNumber(vwin.home, market.win.home) || !sameNumber(vwin.draw, market.win.draw) || !sameNumber(vwin.away, market.win.away)) {
@@ -951,7 +935,7 @@ async function main(options = {}) {
 }
 
 module.exports = {
-  MARKET_MAX_AGE_MS,
+  marketMaxAgeMs,
   computeMarketSnapshotId,
   loadPushScope,
   toMs,
