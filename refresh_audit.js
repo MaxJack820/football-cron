@@ -61,11 +61,12 @@ function computeMarketSnapshotId(snapshot) {
   return `mkt-${marketHash(JSON.stringify(marketSnapshotPayload(snapshot)))}`;
 }
 
-// 盘口指纹 marketFp:只含"盘口实质内容"(fixtureId + 三市场的线与赔率),
-// 【不含】fetchedAt / generationId / expiresAt / sourceUpdatedAt —— 这些每轮抓盘必变的字段进哈希会导致
-// "盘口没变、指纹每轮变",从而让预测↔盘口的绑定天然对不上(旧 snapshotId 的病根)。
-// 同一场盘口没变 → marketFp 跨轮稳定 → 预测与快照天然绑定;源真出新盘(线/赔率变)→ marketFp 随之变。
-// 防旧盘由独立的源龄 5h 门禁承担,不靠指纹。字段顺序必须与前端命中版/价值版、push_value 逐字节一致。
+// 盘口指纹 marketFp:只含"下注条款本身"(fixtureId + 三市场的线与赔率 + 亚盘主线线值),
+// 【不含】fetchedAt/generationId/expiresAt/sourceUpdatedAt(每轮抓盘必变),
+// 也【不含】mainLine.votes/sharpVotes 与 oddsSource/mainLineSource ——这些是"共识元数据/来源标注",
+// 会随每轮抓到的庄家家数漂移(实测:线与赔率完全相同,votes 却从 7→3),把它们纳入指纹会让盘口没动也误判成变了。
+// 投票数完整性另由 validateMarketSnapshot(votes>=1 等)单独校验,不归指纹管。
+// 字段顺序必须与前端命中版/价值版、push_value 逐字节一致。
 function marketFpPayload(snapshot) {
   const markets = snapshot && snapshot.markets || {};
   const win = markets.win || {};
@@ -78,9 +79,7 @@ function marketFpPayload(snapshot) {
       win: { home: win.home, draw: win.draw, away: win.away },
       ah: {
         line: ah.line, home: ah.home, away: ah.away,
-        mainLine: main == null ? null : { line: main.line, votes: main.votes, sharpVotes: main.sharpVotes },
-        oddsSource: ah.oddsSource,
-        mainLineSource: ah.mainLineSource
+        mainLine: main == null ? null : { line: main.line }
       },
       ou: ou == null ? null : { line: ou.line, over: ou.over, under: ou.under }
     }
@@ -91,11 +90,12 @@ function computeMarketFp(snapshot) {
   return `fp-${marketHash(JSON.stringify(marketFpPayload(snapshot)))}`;
 }
 
-// 取或现算:存量快照/预测无 marketFp 字段时就地现算(算法只依赖 markets+fixtureId,旧数据都在),
-// 结果与新写入逐字节一致 → 存量记录零迁移平滑绑定。
+// 绑定用指纹:【始终现算】,不信任快照里存的 marketFp 字段。理由:marketFp 公式可能随版本演进(如曾误含
+// mainLine.votes 这类会漂移的元数据),存量数据里的 marketFp 是旧公式产物;两侧都现算才保证用同一公式、可比。
+// 现算只依赖 markets+fixtureId(所有快照都有),对存量记录零迁移。
 function fpOf(x) {
   if (!x) return null;
-  return x.marketFp || computeMarketFp(x);
+  return computeMarketFp(x);
 }
 
 function validateBlockedSnapshot(snapshot, record, options = {}) {
@@ -214,7 +214,8 @@ function validateMarketSnapshot(snapshot, options = {}) {
   if (!snapshot.fixtureId) add('fixture_id_missing', 'fixtureId 缺失');
   if (!snapshot.snapshotId || typeof snapshot.snapshotId !== 'string') add('snapshot_id_missing', 'snapshotId 缺失');
   else if (snapshot.snapshotId !== computeMarketSnapshotId(snapshot)) add('snapshot_id_content_mismatch', 'snapshotId 与盘口/源时间内容不一致');
-  if (snapshot.marketFp && snapshot.marketFp !== computeMarketFp(snapshot)) add('snapshot_content_mismatch', 'marketFp 与盘口内容不一致');
+  // 盘口内容篡改由上面的 snapshot_id_content_mismatch 兜底(snapshotId 哈希覆盖全部 markets)。marketFp 只做"预测↔盘口"绑定,
+  // 不再对存储的 marketFp 字段做自洽校验——它可能是旧公式产物,绑定侧一律现算,不依赖存储值。
   if (!snapshot.generationId || snapshot.generationId !== generationId) {
     add('generation_mismatch', `snapshot=${snapshot.generationId || ''}, expected=${generationId}`);
   }
@@ -323,7 +324,9 @@ function predictionCarriesSnapshot(version, snapshot) {
   if (!c.win || !s.win || !sameNumber(c.win.home, s.win.home) || !sameNumber(c.win.draw, s.win.draw) || !sameNumber(c.win.away, s.win.away)) return false;
   if (!c.ah || !s.ah || !sameNumber(c.ah.line, s.ah.line) || !sameNumber(c.ah.home, s.ah.home) || !sameNumber(c.ah.away, s.ah.away)) return false;
   const cm = c.ah.mainLine, sm = s.ah.mainLine;
-  if (!cm || !sm || !sameNumber(cm.line, sm.line) || !sameNumber(cm.votes, sm.votes) || !sameNumber(cm.sharpVotes, sm.sharpVotes)) return false;
+  // 只比主线线值(下注条款);【不比】votes/sharpVotes——共识元数据随每轮抓到的庄家家数漂移(线/赔率不变时也会 7→3),
+  // 比它们会误杀盘口未变的 carry-over。投票数下限(votes>=1 等)由各自 validateMarketSnapshot 单独校验。
+  if (!cm || !sm || !sameNumber(cm.line, sm.line)) return false;
   if ((c.ou == null) !== (s.ou == null)) return false;
   if (s.ou && (!sameNumber(c.ou.line, s.ou.line) || !sameNumber(c.ou.over, s.ou.over) || !sameNumber(c.ou.under, s.ou.under))) return false;
   return true;
@@ -422,7 +425,7 @@ function auditGeneration({ fetchData, history, generationId, targetKeys, started
     && identity && record.h === identity.home && record.a === identity.away);
   // 预测 version 的盘口指纹:优先取本轮写入的 version.marketFp;存量(旧页面锁定、无 marketFp)则从其内嵌
   // marketSnapshot 现算(算法只依赖 markets+fixtureId,旧数据都在),结果与新写入逐字节一致。
-  const versionFp = (v) => v && (v.marketFp || (v.marketSnapshot ? computeMarketFp(v.marketSnapshot) : null));
+  const versionFp = (v) => v && v.marketSnapshot ? computeMarketFp(v.marketSnapshot) : null;
   for (const item of snapshots.filter(x => x.valid)) {
     const snapshot = item.snapshot;
     const identity = splitMatchKey(item.key);
