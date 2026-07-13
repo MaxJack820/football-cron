@@ -356,9 +356,11 @@ function auditGeneration({ fetchData, history, generationId, targetKeys, started
     return {
       ok: true,
       empty: true,
+      hasSignal: false,
       generationId,
       targetCount: 0,
       snapshotCount: 0,
+      notRefreshed: 0,
       validCount: 0,
       blockedCount: 0,
       predictionCount: 0,
@@ -382,10 +384,13 @@ function auditGeneration({ fetchData, history, generationId, targetKeys, started
     }
   }
 
+  // 候选里本轮没刷出同代快照的场:多为"距开赛还很久(15-34h),盘口源早停更、本轮抓不到新盘"的正常情况,
+  // 不是质量错误。记为 notRefreshed 计数并 log,但【不进 errors、不阻断整轮】。
+  // 旧逻辑对每个这种场 add('target_not_refreshed') → errors 非空 + snapshots.length<targets.length → 整轮 FAIL,
+  // 导致"6场里5场是远期场、只有1场能实时刷新"的时段几乎必然失败。改为:只要本轮至少1场有效出号即 PASS。
+  let notRefreshed = 0;
   for (const key of targets) {
-    if (!snapshots.some(item => item.key === key)) {
-      add('target_not_refreshed', key, '本轮候选没有同 generation 的市场快照');
-    }
+    if (!snapshots.some(item => item.key === key)) notRefreshed++;
   }
 
   let predictionCount = 0;
@@ -427,12 +432,21 @@ function auditGeneration({ fetchData, history, generationId, targetKeys, started
 
   const validCount = snapshots.filter(item => item.valid).length;
   const blockedCount = blockedItems.length;
+  // PASS/FAIL 语义(改后):
+  //  ok = 没有真质量错误(errors 空;target_not_refreshed 已不计入)且每个有效快照都正确绑定本轮预测。
+  //  "本轮没有一场能刷出新盘"(远期场盘口停更)不再算失败——它是良性空跑,与 empty 同等对待。
+  //  只有出现质量错误(盘口串代/预测不绑定/blocked却出号等)才 FAIL(显红、阻断推送)。
+  //  hasSignal 单独标记本轮是否至少出了 1 场有效号,供 run.js 决定日志与是否推送。
+  const ok = errors.length === 0 && predictionCount === validCount;
+  const hasSignal = predictionCount >= 1;
   return {
-    ok: errors.length === 0 && snapshots.length === targets.length && predictionCount === validCount,
+    ok,
     empty: false,
+    hasSignal,
     generationId,
     targetCount: targets.length,
     snapshotCount: snapshots.length,
+    notRefreshed,
     validCount,
     blockedCount,
     predictionCount,
