@@ -10,24 +10,10 @@ const SB_KEY = process.env.SB_KEY || 'sb_publishable_PHn7mHo7mUgQBTD9GFLBaA_u8tj
 const DEFAULT_SOURCE_MAX_AGE_MS = 15 * 60 * 1000;
 const DEFAULT_CLOCK_SKEW_MS = 60 * 1000;
 
-// 盘口新鲜度门禁,必须与前端 football_new.html 的 MARKET_FRESHNESS_TIERS 完全一致。
-// 实测(260713):API-Football 赛前赔率每4小时批量更新一次(00/04/08/12/16点整),不分远期近期。
-// 故 sourceMaxAgeMs 三档统一放宽到 5h(4h批次+缓冲),否则批次之间全场判 source_stale、出不了号。
-// TTL 仍分级(仅控制页面重抓频率,与数据源新鲜度无关)。kickoffMs 由快照携带,不进 snapshotId 哈希。
+// 盘口新鲜度门禁:源龄上限。实测(260713)API-Football 赛前赔率每4小时批量更新一次(00/04/08/12/16点整),
+// 不分远期近期,故统一 5h(4h批次+缓冲),否则批次之间全场 source_stale、出不了号。
+// (审计只用源龄这一个门槛;TTL 分级是前端建快照算 expiresAt 时的事,审计不涉及,故此处不再保留伪分级表。)
 const _SRC_MAX_AGE_MS = 5 * 60 * 60 * 1000;
-const MARKET_FRESHNESS_TIERS = [
-  { maxHoursToKo: 1, sourceMaxAgeMs: _SRC_MAX_AGE_MS, ttlMs: 20 * 60 * 1000 },
-  { maxHoursToKo: 6, sourceMaxAgeMs: _SRC_MAX_AGE_MS, ttlMs: 45 * 60 * 1000 },
-  { maxHoursToKo: Infinity, sourceMaxAgeMs: _SRC_MAX_AGE_MS, ttlMs: 90 * 60 * 1000 }
-];
-// 无法判定距开赛(缺 kickoffMs)时保守取最严一档。sourceMaxAgeMs 显式传入(options)时优先,用于测试/环境覆盖。
-function marketTier(kickoffMs, atMs) {
-  const koMs = Number(kickoffMs);
-  if (!Number.isFinite(koMs)) return MARKET_FRESHNESS_TIERS[0];
-  const hrs = (koMs - (Number.isFinite(atMs) ? atMs : Date.now())) / 3600e3;
-  for (const t of MARKET_FRESHNESS_TIERS) if (hrs <= t.maxHoursToKo) return t;
-  return MARKET_FRESHNESS_TIERS[MARKET_FRESHNESS_TIERS.length - 1];
-}
 
 function parseTs(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value > 0 && value < 1e12 ? value * 1000 : value;
@@ -176,9 +162,8 @@ function validateMarketSnapshot(snapshot, options = {}) {
   const nowMs = options.nowMs == null ? Date.now() : options.nowMs;
   const startedMs = options.startedMs == null ? null : options.startedMs;
   const generationId = options.generationId || '';
-  // 分级门禁:按快照携带的 kickoffMs 选档;显式传入 sourceMaxAgeMs(测试/环境覆盖)时优先。
-  const tier = marketTier(snapshot && snapshot.kickoffMs, nowMs);
-  const sourceMaxAgeMs = options.sourceMaxAgeMs || tier.sourceMaxAgeMs;
+  // 源龄上限统一 5h;显式传入 sourceMaxAgeMs(测试/环境覆盖)时优先。
+  const sourceMaxAgeMs = options.sourceMaxAgeMs || _SRC_MAX_AGE_MS;
   const clockSkewMs = options.clockSkewMs || DEFAULT_CLOCK_SKEW_MS;
   const errors = [];
   const add = (code, detail) => errors.push({ code, detail });
