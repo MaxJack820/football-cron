@@ -96,6 +96,24 @@ test('同代、同快照、同赔率可通过审计', () => {
   assert.deepEqual(result.errors, []);
 });
 
+test('存在重复/僵尸 pending 时,只要有一条正确绑定本轮快照即通过(容忍重复)', () => {
+  const snap = snapshot();
+  // 僵尸重复:同名 pending,但其 version 没绑定本轮 snapshotId(模拟历史遗留的旧记录)。
+  const zombie = { h: '主队', a: '客队', status: 'pending', versions: [{ ts: '2026-07-09T00:00:00.000Z', marketSnapshotId: null, generationId: null }] };
+  const good = prediction(snap);
+  const result = auditGeneration({
+    fetchData: { [KEY]: fetchRecord(snap) },
+    history: [zombie, good],
+    generationId: GEN,
+    targetKeys: [KEY],
+    startedAt: START,
+    nowMs: NOW
+  });
+  assert.equal(result.ok, true, '重复 pending 不应再让整轮 FAIL');
+  assert.equal(result.predictionCount, 1);
+  assert.ok(!result.errors.some(e => e.code === 'prediction_snapshot_link_invalid'));
+});
+
 test('仅 fetchedAt 新、源赔率时间旧仍拒绝', () => {
   const errors = validateMarketSnapshot(snapshot({
     sourceUpdatedAt: '2026-07-11T04:00:00.000Z',
