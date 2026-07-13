@@ -27,7 +27,7 @@ const CLOUD_AUDIT_WAIT_MS = Number(process.env.FP_CLOUD_AUDIT_WAIT_MS) || 120000
 const CLOUD_AUDIT_POLL_MS = 8000;
 // ⚠️ 必须 >= 线上页面 build 号。快照链依赖新版页面(写 kickoffMs、canonical snapshotId)。
 // 若线上是旧页面,快照会对不上→全场误拦。部署顺序:先传新页面到 Cloudflare,再让后端跑。
-const MIN_PAGE_BUILD = process.env.FP_MIN_PAGE_BUILD || '260713.1';
+const MIN_PAGE_BUILD = process.env.FP_MIN_PAGE_BUILD || '260713.2';
 const generationId = process.env.FP_REFRESH_GENERATION_ID || `refresh-${new Date().toISOString().replace(/[-:.TZ]/g, '')}-${crypto.randomUUID().slice(0, 8)}`;
 const startedAt = new Date().toISOString();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
