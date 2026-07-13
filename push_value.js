@@ -202,6 +202,33 @@ function marketHash(text) {
 function computeMarketSnapshotId(snapshot) {
   return `mkt-${marketHash(JSON.stringify(marketSnapshotPayload(snapshot)))}`;
 }
+// 盘口指纹 marketFp:只含盘口实质(fixtureId + 三市场线与赔率),不含 fetchedAt/generationId/expiresAt/sourceUpdatedAt。
+// 字段顺序必须与 refresh_audit.js、前端命中版/价值版逐字节一致(靠 test 同步守卫)。稳定指纹取代易变 snapshotId 做绑定。
+function marketFpPayload(snapshot) {
+  const markets = snapshot && snapshot.markets || {};
+  const win = markets.win || {};
+  const ah = markets.ah || {};
+  const main = ah.mainLine;
+  const ou = markets.ou;
+  return {
+    fixtureId: snapshot && snapshot.fixtureId != null ? String(snapshot.fixtureId) : null,
+    markets: {
+      win: { home: win.home, draw: win.draw, away: win.away },
+      ah: {
+        line: ah.line, home: ah.home, away: ah.away,
+        mainLine: main == null ? null : { line: main.line, votes: main.votes, sharpVotes: main.sharpVotes },
+        oddsSource: ah.oddsSource,
+        mainLineSource: ah.mainLineSource
+      },
+      ou: ou == null ? null : { line: ou.line, over: ou.over, under: ou.under }
+    }
+  };
+}
+function computeMarketFp(snapshot) {
+  return `fp-${marketHash(JSON.stringify(marketFpPayload(snapshot)))}`;
+}
+// 取或现算:存量无 marketFp 时就地现算,结果与新写入一致 → 零迁移平滑绑定。
+function fpOf(x) { return x ? (x.marketFp || computeMarketFp(x)) : null; }
 function toMs(x) {
   if (x == null || x === '') return null;
   if (Number.isFinite(+x)) {
@@ -225,6 +252,7 @@ function validateMarketSnapshot(fdo, now = Date.now()) {
   if (+s.schema !== 1) return { ok: false, reason: 'snapshot-schema' };
   if (!s.snapshotId) return { ok: false, reason: 'snapshot-id-missing' };
   if (s.snapshotId !== computeMarketSnapshotId(s)) return { ok: false, reason: 'snapshot-id-content-mismatch' };
+  if (s.marketFp && s.marketFp !== computeMarketFp(s)) return { ok: false, reason: 'snapshot-content-mismatch' };
   if (!s.generationId) return { ok: false, reason: 'snapshot-generation-missing' };
   if (s.fixtureId == null || s.fixtureId === '') return { ok: false, reason: 'snapshot-fixture-missing' };
   if (s.source !== 'api-football') return { ok: false, reason: 'snapshot-source' };
@@ -328,12 +356,14 @@ function validateModelVersion(v, market, now = Date.now(), ko = null) {
   const ts = toMs(v.ts);
   if (!ts || ts > now + CLOCK_SKEW_MS || (ko && ts > ko)) return { ok: false, reason: 'version-ts-invalid' };
   const s = market.snapshot;
-  if (!v.marketSnapshotId || v.marketSnapshotId !== s.snapshotId) return { ok: false, reason: 'version-snapshot-mismatch' };
+  // 绑定判据用稳定盘口指纹 marketFp(替代易变 snapshotId);存量无 marketFp 则从内嵌快照现算。
+  const vFp = v.marketFp || (v.marketSnapshot ? computeMarketFp(v.marketSnapshot) : null);
+  if (!vFp || vFp !== fpOf(s)) return { ok: false, reason: 'version-snapshot-mismatch' };
   if (!v.generationId || v.generationId !== s.generationId) return { ok: false, reason: 'version-generation-mismatch' };
 
   const vs = v.marketSnapshot;
   if (!vs || typeof vs !== 'object') return { ok: false, reason: 'version-snapshot-missing' };
-  if (vs.snapshotId !== s.snapshotId || vs.generationId !== s.generationId) return { ok: false, reason: 'version-snapshot-copy-mismatch' };
+  if (fpOf(vs) !== fpOf(s) || vs.generationId !== s.generationId) return { ok: false, reason: 'version-snapshot-copy-mismatch' };
   if (+vs.schema !== +s.schema || String(vs.fixtureId) !== String(s.fixtureId) || vs.source !== s.source) {
     return { ok: false, reason: 'version-snapshot-identity-mismatch' };
   }
@@ -937,6 +967,7 @@ async function main(options = {}) {
 module.exports = {
   marketMaxAgeMs,
   computeMarketSnapshotId,
+  computeMarketFp,
   loadPushScope,
   toMs,
   validateMarketSnapshot,
