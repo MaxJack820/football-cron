@@ -202,7 +202,8 @@ function marketHash(text) {
 function computeMarketSnapshotId(snapshot) {
   return `mkt-${marketHash(JSON.stringify(marketSnapshotPayload(snapshot)))}`;
 }
-// 盘口指纹 marketFp:只含盘口实质(fixtureId + 三市场线与赔率),不含 fetchedAt/generationId/expiresAt/sourceUpdatedAt。
+// 盘口指纹 marketFp:只含下注条款(fixtureId+三市场线与赔率+亚盘主线线值),不含 fetchedAt/generationId/expiresAt/
+// sourceUpdatedAt,也不含 mainLine.votes/sharpVotes 与 oddsSource/mainLineSource(共识元数据,随抓到的庄家家数漂移)。
 // 字段顺序必须与 refresh_audit.js、前端命中版/价值版逐字节一致(靠 test 同步守卫)。稳定指纹取代易变 snapshotId 做绑定。
 function marketFpPayload(snapshot) {
   const markets = snapshot && snapshot.markets || {};
@@ -216,9 +217,7 @@ function marketFpPayload(snapshot) {
       win: { home: win.home, draw: win.draw, away: win.away },
       ah: {
         line: ah.line, home: ah.home, away: ah.away,
-        mainLine: main == null ? null : { line: main.line, votes: main.votes, sharpVotes: main.sharpVotes },
-        oddsSource: ah.oddsSource,
-        mainLineSource: ah.mainLineSource
+        mainLine: main == null ? null : { line: main.line }
       },
       ou: ou == null ? null : { line: ou.line, over: ou.over, under: ou.under }
     }
@@ -228,7 +227,8 @@ function computeMarketFp(snapshot) {
   return `fp-${marketHash(JSON.stringify(marketFpPayload(snapshot)))}`;
 }
 // 取或现算:存量无 marketFp 时就地现算,结果与新写入一致 → 零迁移平滑绑定。
-function fpOf(x) { return x ? (x.marketFp || computeMarketFp(x)) : null; }
+// 绑定用指纹:始终现算,不信任存储的 marketFp 字段(公式可能演进,存量是旧公式产物;两侧现算才可比,存量零迁移)。
+function fpOf(x) { return x ? computeMarketFp(x) : null; }
 function toMs(x) {
   if (x == null || x === '') return null;
   if (Number.isFinite(+x)) {
@@ -252,7 +252,7 @@ function validateMarketSnapshot(fdo, now = Date.now()) {
   if (+s.schema !== 1) return { ok: false, reason: 'snapshot-schema' };
   if (!s.snapshotId) return { ok: false, reason: 'snapshot-id-missing' };
   if (s.snapshotId !== computeMarketSnapshotId(s)) return { ok: false, reason: 'snapshot-id-content-mismatch' };
-  if (s.marketFp && s.marketFp !== computeMarketFp(s)) return { ok: false, reason: 'snapshot-content-mismatch' };
+  // 盘口内容篡改由 snapshot-id-content-mismatch 兜底;marketFp 只做绑定、一律现算,不校验存储值(可能旧公式)。
   if (!s.generationId) return { ok: false, reason: 'snapshot-generation-missing' };
   if (s.fixtureId == null || s.fixtureId === '') return { ok: false, reason: 'snapshot-fixture-missing' };
   if (s.source !== 'api-football') return { ok: false, reason: 'snapshot-source' };
@@ -357,7 +357,7 @@ function validateModelVersion(v, market, now = Date.now(), ko = null) {
   if (!ts || ts > now + CLOCK_SKEW_MS || (ko && ts > ko)) return { ok: false, reason: 'version-ts-invalid' };
   const s = market.snapshot;
   // 绑定判据用稳定盘口指纹 marketFp(替代易变 snapshotId);存量无 marketFp 则从内嵌快照现算。
-  const vFp = v.marketFp || (v.marketSnapshot ? computeMarketFp(v.marketSnapshot) : null);
+  const vFp = v.marketSnapshot ? computeMarketFp(v.marketSnapshot) : null;
   if (!vFp || vFp !== fpOf(s)) return { ok: false, reason: 'version-snapshot-mismatch' };
   if (!v.generationId || v.generationId !== s.generationId) return { ok: false, reason: 'version-generation-mismatch' };
 
@@ -381,11 +381,11 @@ function validateModelVersion(v, market, now = Date.now(), ko = null) {
     return { ok: false, reason: 'version-win-mismatch' };
   }
   const vah = vs.markets && vs.markets.ah;
+  // votes/sharpVotes 只校验各自的下限有效性(>=1 等),【不比】两轮相等——共识元数据随抓到的庄家家数漂移,
+  // 线/赔率不变时也会变,比相等会误杀盘口未变的 carry-over。
   if (!vah || !vah.mainLine || !Number.isFinite(+vah.mainLine.votes) || +vah.mainLine.votes < 1
       || !Number.isFinite(+vah.mainLine.sharpVotes) || +vah.mainLine.sharpVotes < 0 || +vah.mainLine.sharpVotes > +vah.mainLine.votes
       || !sameNumber(vah.mainLine.line, market.ah.line)
-      || !sameNumber(vah.mainLine.votes, market.ah.mainLine.votes)
-      || !sameNumber(vah.mainLine.sharpVotes, market.ah.mainLine.sharpVotes)
       || !sameNumber(vah.line, market.ah.line) || !sameNumber(vah.home, market.ah.home) || !sameNumber(vah.away, market.ah.away)) {
     return { ok: false, reason: 'version-ah-mismatch' };
   }
