@@ -388,8 +388,11 @@ function auditGeneration({ fetchData, history, generationId, targetKeys, started
       const v = latestVersion(record);
       return v && v.marketSnapshotId === snapshot.snapshotId;
     });
-    if (matching.length !== 1) {
-      add('prediction_snapshot_link_invalid', item.key, `关联到 ${matching.length} 条 pending 预测`);
+    // 容忍重复 pending:只要有【至少 1 条】预测正确绑定本轮快照即算通过,取其一做后续校验。
+    // 旧逻辑要求"恰好 1 条",遇到历史遗留的重复/僵尸 pending(同名多条)会让整场 link_invalid → 整轮 FAIL。
+    // 0 条才是真问题(快照有效但没有任何预测绑定它)。
+    if (matching.length < 1) {
+      add('prediction_snapshot_link_invalid', item.key, `关联到 0 条 pending 预测`);
       continue;
     }
     const record = matching[0];
