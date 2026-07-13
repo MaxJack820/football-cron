@@ -253,18 +253,22 @@ test('OU=null 时 fetchData 和 oddsSnap 都必须清空，不能残留旧 OU', 
   assert.ok(result.errors.some(error => error.code === 'prediction_odds_mismatch'));
 });
 
-test('候选为空是成功空跑，候选有缺口则失败', () => {
+test('候选为空是成功空跑;候选全未刷新是良性空跑(不再算失败)', () => {
   const empty = auditGeneration({
     fetchData: {}, history: [], generationId: GEN, targetKeys: [], startedAt: START, nowMs: NOW
   });
   assert.equal(empty.ok, true);
   assert.equal(empty.empty, true);
+  assert.equal(empty.hasSignal, false);
 
-  const missing = auditGeneration({
+  // 候选存在但本轮一场都没刷出同代快照(远期场盘口停更):良性空跑,不算失败、不产生错误。
+  const noneRefreshed = auditGeneration({
     fetchData: {}, history: [], generationId: GEN, targetKeys: [KEY], startedAt: START, nowMs: NOW
   });
-  assert.equal(missing.ok, false);
-  assert.ok(missing.errors.some(error => error.code === 'target_not_refreshed'));
+  assert.equal(noneRefreshed.ok, true, '全未刷新应视为良性空跑 PASS');
+  assert.equal(noneRefreshed.hasSignal, false, '没有有效出号');
+  assert.equal(noneRefreshed.notRefreshed, 1);
+  assert.ok(!noneRefreshed.errors.some(error => error.code === 'target_not_refreshed'), 'target_not_refreshed 不再计入错误');
 });
 
 test('盘口或源时间被改写但沿用旧 snapshotId 时审计拒绝', () => {
