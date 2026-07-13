@@ -211,6 +211,7 @@ async function waitForCloudAudit(context) {
     throw new Error('本轮市场刷新/预测未通过 freshness 审计，已阻止后续价值推送');
   }
   if (result.empty) console.log('✅ 当前 36 小时内没有候选比赛，本轮成功空跑。');
+  else if (!result.hasSignal) console.log(`✅ 本轮成功空跑：${result.targetCount} 场候选中,${result.notRefreshed || 0} 场因盘口源停更/未开盘本轮抓不到新盘,${result.blockedCount} 场明确拦截,暂无可出号的比赛(非故障,等有新鲜盘口的时段自然出号)。`);
   else console.log(`✅ 完成：${result.validCount} 场绑定本轮最新盘口赔率并生成预测；${result.blockedCount} 场因无盘/源过期等明确拦截，不出预测和推荐。`);
 })().catch(error => {
   console.error('❌ 后台刷新失败:', error.message || error);
