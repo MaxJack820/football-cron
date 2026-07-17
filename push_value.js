@@ -171,8 +171,8 @@ function bjParts(d = new Date()) {
 const koMs = (d, t) => (!d || !/^\d{1,2}:\d{2}$/.test(t || '')) ? null : new Date(`${d}T${t}:00+08:00`).getTime();
 const koHourBJ = ms => +new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', hour12: false }).format(new Date(ms)).replace('24', '00');
 const inWindow = h => (h >= 12 || h < 5); // 12:00–04:59 北京
-// 投注日按"中午12点"锚定,使 12:00–05:00 整段算同一天(每日封顶不被午夜切断)
-function bettingDay() { const bj = bjParts(); if (bj.hour >= 12) return bj.date; const d = new Date(bj.date + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10); }
+// 投注日 = 北京自然日。睡眠窗取消后不再需要"中午12点锚定跨午夜"(那是为 12:00-05:00 整段算同一天而设)。
+function bettingDay() { return bjParts().date; }
 const fmtLine = n => (n > 0 ? '+' : '') + n;
 const validOdds = x => Number.isFinite(+x) && +x > 1.05;
 const presentNumber = x => x != null && x !== '' && Number.isFinite(+x);
@@ -772,7 +772,7 @@ async function main(options = {}) {
   }
   if (!BARK && !DRY) throw new Error('缺 BARK_KEY');
   const now = Date.now(), bj = bjParts();
-  if (!inWindow(bj.hour) && !DRY) { console.log(`当前北京 ${bj.hour}:xx 非推送窗(12:00-05:00),跳过`); return; }
+  // 睡眠窗已取消(2026-07-16,用户要求)：任何时间有号就推,不再限制北京 12:00-05:00。保留开赛前≤4h(盘口成熟度)。
   // ACC_MODE 用独立的战绩/去重 key，与价值版口径完全分开，互不污染。
   const BETS_KEY = ACC_MODE ? ACC_BETS_KEY : 'fp_valueBets';
   const PUSHSTATE_KEY = ACC_MODE ? 'fp_accPushState' : 'fp_pushState';
@@ -801,7 +801,7 @@ async function main(options = {}) {
     if (pushedSet.has(key)) continue;
     const ko = koMs(r.matchDate, r.matchTime); if (ko == null || ko <= now) continue;
     const hToKo = (ko - now) / 3600e3; if (hToKo > MATURE_H) continue;          // 仅开赛前≤4h(盘口成熟)
-    if (!inWindow(koHourBJ(ko))) continue;                                       // KO 须落在 12:00–05:00
+    // 睡眠窗已取消:不再要求 KO 落在北京 12:00-05:00,任何开赛时段的号都可推。
     const fdo = fetchData[targetKey];
     if (!fdo) { reject('fetchdata-missing'); continue; }
     const context = scopedFreshModelMarket(r, fdo, pushScope, targetKey, now, ko);
