@@ -15,13 +15,11 @@ const EV_MIN = 0.08, STAKE = 50, STAKE_HI = 75, EV_HI = 0.12, MATURE_H = 4;
 // 环境变量 DAILY_CAP 可覆盖。价值EV口径不再真推(见 predict.yml),此上限主要服务命中版口径。
 const DAILY_CAP = Number(process.env.DAILY_CAP) > 0 ? Number(process.env.DAILY_CAP) : 12;
 // ── 命中版口径推送(2026-07-16)：ACC_MODE=1 时，选场标准从"EV≥8%"换成"命中版会出的号"──
-//   命中版出号核心判据 = 亚盘方向概率(valueAh 的 p)落在甜区 [54%,60%) 且联赛非 block。
-//   依据：304场回测，命中版按甜区+联赛过滤的出号方向按真实赔率下注约 +26%~30%；而价值版 EV≥8% 口径实盘亏损。
-//   与命中版前端 ACC_SWEET_LO/HI 及 LEAGUE_AH_TIER.block 保持一致(改一处要同步另一处)。
-//   平注(不按 EV 分档，因回测显示高EV上大注是负贡献)。战绩写独立 key fp_accBets，不污染 fp_valueBets。
+//   直接读命中版前端固化的出号档 r.accTier(football_new.html 保存/临场重算时写入,含完整 _decisionAdvice 风控)。
+//   命中版出【正式go/次选light】才推 → "命中版出啥、推送窗推啥"100%一致,后端不复刻出号逻辑(单一真相源在命中版前端)。
+//   依据：304场回测,命中版口径出号方向按真实赔率下注约 +26%~30%；EV≥8% 口径实盘亏损。
+//   平注(高EV上大注在回测/实盘均为负贡献)。战绩写独立 key fp_accBets，不污染 fp_valueBets。
 const ACC_MODE = process.env.ACC_MODE === '1';
-const ACC_SWEET_LO = 0.54, ACC_SWEET_HI = 0.60;
-const ACC_LEAGUE_BLOCK = /冰岛超|欧会|欧协联|欧洲协会联赛|欧联|瑞典超/;
 const ACC_BETS_KEY = 'fp_accBets';
 // 源龄门禁,必须与前端 MARKET_FRESHNESS_TIERS / refresh_audit 完全一致。
 // 实测(260713):API-Football 赛前赔率每4小时批量更新一次,不分远期近期。源龄上限统一 5h(4h批次+缓冲),
@@ -811,15 +809,36 @@ async function main(options = {}) {
     const pick = bestMarket(r, context);
     if (!pick) continue;
     if (ACC_MODE) {
-      // 命中版口径：只推"命中版会出的号"——亚盘方向概率在甜区 [54%,60%) 且联赛非 block。不看 EV。
-      if (!(pick.p >= ACC_SWEET_LO && pick.p < ACC_SWEET_HI)) { reject('acc-not-sweet'); continue; }
-      if (ACC_LEAGUE_BLOCK.test(r.league || '')) { reject('acc-league-block'); continue; }
+      // 命中版口径：直接读命中版前端固化的出号档 r.accTier(由 football_new.html 保存/临场重算时写)。
+      // 命中版出【正式(go)/次选(light)】才推 → "命中版出啥、推送窗推啥",100%一致,后端不复刻出号逻辑。
+      // 若 accTier 缺失(旧页面未升级/未写),fail-closed 不推,避免用错口径。
+      const tier = r.accTier && r.accTier.tier;
+      if (tier !== 'go' && tier !== 'light') { reject('acc-not-hit-tier:' + (tier || 'missing')); continue; }
     } else {
       if (pick.ev < EV_MIN) continue;
     }
+    // ACC_MODE：推送方向必须用命中版的方向(accTier.dir)，而非 valueAh 另选的方向(取两边EV高者，可能相反)。
+    // 若命中版方向与 valueAh 选的不同，用命中版 side 对应的赔率重新定价，保证"推的方向=命中版出的方向"。
+    let pushPick = pick;
+    if (ACC_MODE) {
+      const dir = r.accTier && r.accTier.dir;
+      if (!dir || dir.market !== 'AH' || (dir.side !== 'home' && dir.side !== 'away')) { reject('acc-dir-missing'); continue; }
+      const oH = context.market.ah && context.market.ah.home, oA = context.market.ah && context.market.ah.away;
+      const dirOdds = dir.side === 'home' ? oH : oA;
+      pushPick = {
+        market: 'AH', marketName: '亚盘', betSide: dir.side,
+        side: dir.side === 'home' ? r.h : r.a,
+        line: dir.line, sline: dir.side === 'home' ? dir.line : -dir.line,
+        odds: (dir.odds != null ? dir.odds : dirOdds),
+        ev: pick.betSide === dir.side ? pick.ev : null, // 方向与valueAh一致才沿用其EV，否则EV不适用(命中版不看EV)
+        p: (dir.conf != null ? dir.conf / 100 : pick.p),
+        edge: null, fiveState: null, pricing: null
+      };
+    }
     cands.push({
       key, lg: r.league || '', h: r.h, a: r.a, md: r.matchDate || '', ko,
-      ...pick,
+      ...pushPick,
+      accTier: r.accTier && r.accTier.tier,
       stake: ACC_MODE ? STAKE : (pick.ev >= EV_HI ? STAKE_HI : STAKE), // 命中版口径平注(高EV上大注在回测/实盘均为负贡献)
       predictionVersionTs: context.version.ts,
       marketSnapshotId: context.market.snapshot.snapshotId,
@@ -888,7 +907,7 @@ async function main(options = {}) {
     const risk = c.riskTags && c.riskTags.length ? `\n风险:${c.riskTags.join('、')}` : '';
     const srcTime = new Date(current.freshness.sourceUpdatedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false });
     const body = ACC_MODE
-      ? `[${c.lg}] ${c.h} vs ${c.a}\n${pickLine(c)}\n命中版方向概率${(c.p * 100).toFixed(1)}% · 参考EV+${(c.ev * 100).toFixed(1)}\n赔率源更新 ${srcTime} · 快照 ${c.marketSnapshotId}\n今日第 ${todayCount + 1}/${DAILY_CAP} 注 · 系统记录注${c.stake}`
+      ? `[${c.lg}] ${c.h} vs ${c.a}\n${pickLine(c)}\n命中版方向概率${(c.p * 100).toFixed(1)}%${c.ev != null ? ` · 参考EV+${(c.ev * 100).toFixed(1)}` : ''} · 命中版${c.accTier === 'go' ? '正式号' : '次选号'}\n赔率源更新 ${srcTime} · 快照 ${c.marketSnapshotId}\n今日第 ${todayCount + 1}/${DAILY_CAP} 注 · 系统记录注${c.stake}`
       : `[${c.lg}] ${c.h} vs ${c.a}\n${pickLine(c)}\n模型${(c.p * 100).toFixed(1)}% · 五态EV+${(c.ev * 100).toFixed(1)} · 建议:${c.followText}${risk}\n赔率源更新 ${srcTime} · 快照 ${c.marketSnapshotId}\n今日第 ${todayCount + 1}/${DAILY_CAP} 注 · 系统记录注${c.stake}`;
     if (DRY) { console.log('[DRY] 推送 →', title, '|', body.replace(/\n/g, ' / ')); todayCount++; sent++; continue; }
     const ok = await bark(title, body);
@@ -898,9 +917,9 @@ async function main(options = {}) {
       valueBets.push({
         key: c.key, lg: c.lg, h: c.h, a: c.a, md: c.md,
         market: c.market, marketName: c.marketName, betSide: c.betSide, side: c.side,
-        line: c.line, sline: c.sline, odds: c.odds, ev: +c.ev.toFixed(3),
+        line: c.line, sline: c.sline, odds: c.odds, ev: c.ev == null ? null : +c.ev.toFixed(3),
         prob: +c.p.toFixed(3), edge: c.edge == null ? null : +c.edge.toFixed(3),
-        fiveState: c.fiveState, pricing: c.pricing,
+        fiveState: c.fiveState, pricing: c.pricing, accTier: c.accTier || null,
         follow: c.follow, followText: c.followText, riskTags: c.riskTags || [],
         stake: c.stake, ko: c.ko, pushedAt: Date.now(),
         predictionVersionTs: c.predictionVersionTs,
