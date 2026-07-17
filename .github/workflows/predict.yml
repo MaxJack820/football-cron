@@ -65,3 +65,14 @@ jobs:
           BARK_KEY: ${{ secrets.BARK_KEY }}
           SB_KEY: ${{ secrets.SB_KEY }}
           REFRESH_AUDIT_FILE: .refresh-audit.json
+      # 命中版口径推送(ACC_MODE):选场=命中版甜区54-60+联赛过滤(非EV),平注,战绩写 fp_accBets。
+      # 复用同一份 .refresh-audit.json(与价值号同一套 fail-closed 审计)。与价值号相互独立:
+      # 独立去重 key(fp_accPushState)、独立战绩 key(fp_accBets),不占价值号每日额度、不写 fp_valueBets。
+      # 用不同 Bark group,可用 ACC_BARK_KEY 单独指定推送目标(不设则复用 BARK_KEY)。
+      - name: 推送命中号(Bark · ACC_MODE)
+        run: node push_value.js
+        env:
+          ACC_MODE: '1'
+          BARK_KEY: ${{ secrets.ACC_BARK_KEY || secrets.BARK_KEY }}
+          SB_KEY: ${{ secrets.SB_KEY }}
+          REFRESH_AUDIT_FILE: .refresh-audit.json
