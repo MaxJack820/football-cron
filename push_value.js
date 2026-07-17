@@ -10,7 +10,10 @@ const BARK = process.env.BARK_KEY;
 const BARK_SERVER = process.env.BARK_SERVER || 'https://api.day.app';
 const DRY = process.env.DRY_RUN === '1';
 
-const EV_MIN = 0.08, STAKE = 50, STAKE_HI = 75, EV_HI = 0.12, DAILY_CAP = 8, MATURE_H = 4;
+const EV_MIN = 0.08, STAKE = 50, STAKE_HI = 75, EV_HI = 0.12, MATURE_H = 4;
+// 每日推送上限:命中版口径(ACC_MODE)平均每天约3.6注、历史峰值11注 → 上限12(覆盖峰值,仍保留极端日封顶)。
+// 环境变量 DAILY_CAP 可覆盖。价值EV口径不再真推(见 predict.yml),此上限主要服务命中版口径。
+const DAILY_CAP = Number(process.env.DAILY_CAP) > 0 ? Number(process.env.DAILY_CAP) : 12;
 // ── 命中版口径推送(2026-07-16)：ACC_MODE=1 时，选场标准从"EV≥8%"换成"命中版会出的号"──
 //   命中版出号核心判据 = 亚盘方向概率(valueAh 的 p)落在甜区 [54%,60%) 且联赛非 block。
 //   依据：304场回测，命中版按甜区+联赛过滤的出号方向按真实赔率下注约 +26%~30%；而价值版 EV≥8% 口径实盘亏损。
