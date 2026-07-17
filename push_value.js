@@ -11,6 +11,15 @@ const BARK_SERVER = process.env.BARK_SERVER || 'https://api.day.app';
 const DRY = process.env.DRY_RUN === '1';
 
 const EV_MIN = 0.08, STAKE = 50, STAKE_HI = 75, EV_HI = 0.12, DAILY_CAP = 8, MATURE_H = 4;
+// ── 命中版口径推送(2026-07-16)：ACC_MODE=1 时，选场标准从"EV≥8%"换成"命中版会出的号"──
+//   命中版出号核心判据 = 亚盘方向概率(valueAh 的 p)落在甜区 [54%,60%) 且联赛非 block。
+//   依据：304场回测，命中版按甜区+联赛过滤的出号方向按真实赔率下注约 +26%~30%；而价值版 EV≥8% 口径实盘亏损。
+//   与命中版前端 ACC_SWEET_LO/HI 及 LEAGUE_AH_TIER.block 保持一致(改一处要同步另一处)。
+//   平注(不按 EV 分档，因回测显示高EV上大注是负贡献)。战绩写独立 key fp_accBets，不污染 fp_valueBets。
+const ACC_MODE = process.env.ACC_MODE === '1';
+const ACC_SWEET_LO = 0.54, ACC_SWEET_HI = 0.60;
+const ACC_LEAGUE_BLOCK = /冰岛超|欧会|欧协联|欧洲协会联赛|欧联|瑞典超/;
+const ACC_BETS_KEY = 'fp_accBets';
 // 源龄门禁,必须与前端 MARKET_FRESHNESS_TIERS / refresh_audit 完全一致。
 // 实测(260713):API-Football 赛前赔率每4小时批量更新一次,不分远期近期。源龄上限统一 5h(4h批次+缓冲),
 // 否则价值号在批次之间几乎永远推不出。kickoffMs 由快照携带(不进 snapshotId 哈希)。
@@ -763,7 +772,10 @@ async function main(options = {}) {
   if (!BARK && !DRY) throw new Error('缺 BARK_KEY');
   const now = Date.now(), bj = bjParts();
   if (!inWindow(bj.hour) && !DRY) { console.log(`当前北京 ${bj.hour}:xx 非推送窗(12:00-05:00),跳过`); return; }
-  const [hist, fd, st, vbRaw, wbRaw] = await Promise.all([sbGet('fp_hist5'), sbGet('fp_fetchData'), sbGet('fp_pushState'), sbGet('fp_valueBets'), sbGet('fp_watchBets')]);
+  // ACC_MODE 用独立的战绩/去重 key，与价值版口径完全分开，互不污染。
+  const BETS_KEY = ACC_MODE ? ACC_BETS_KEY : 'fp_valueBets';
+  const PUSHSTATE_KEY = ACC_MODE ? 'fp_accPushState' : 'fp_pushState';
+  const [hist, fd, st, vbRaw, wbRaw] = await Promise.all([sbGet('fp_hist5'), sbGet('fp_fetchData'), sbGet(PUSHSTATE_KEY), sbGet(BETS_KEY), sbGet('fp_watchBets')]);
   if (!hist) { console.error('读不到 fp_hist5'); process.exit(1); }
   const fetchData = fd || {};
   const bday = bettingDay();
@@ -794,11 +806,18 @@ async function main(options = {}) {
     const context = scopedFreshModelMarket(r, fdo, pushScope, targetKey, now, ko);
     if (!context.ok) { reject(context.reason); continue; }
     const pick = bestMarket(r, context);
-    if (!pick || pick.ev < EV_MIN) continue;
+    if (!pick) continue;
+    if (ACC_MODE) {
+      // 命中版口径：只推"命中版会出的号"——亚盘方向概率在甜区 [54%,60%) 且联赛非 block。不看 EV。
+      if (!(pick.p >= ACC_SWEET_LO && pick.p < ACC_SWEET_HI)) { reject('acc-not-sweet'); continue; }
+      if (ACC_LEAGUE_BLOCK.test(r.league || '')) { reject('acc-league-block'); continue; }
+    } else {
+      if (pick.ev < EV_MIN) continue;
+    }
     cands.push({
       key, lg: r.league || '', h: r.h, a: r.a, md: r.matchDate || '', ko,
       ...pick,
-      stake: pick.ev >= EV_HI ? STAKE_HI : STAKE,
+      stake: ACC_MODE ? STAKE : (pick.ev >= EV_HI ? STAKE_HI : STAKE), // 命中版口径平注(高EV上大注在回测/实盘均为负贡献)
       predictionVersionTs: context.version.ts,
       marketSnapshotId: context.market.snapshot.snapshotId,
       generationId: context.market.snapshot.generationId,
@@ -806,7 +825,9 @@ async function main(options = {}) {
       freshness: context.market.freshness
     });
   }
-  cands.forEach(c => Object.assign(c, followProfile(c, now)));
+  // 软过滤(低概率<55%/深盘/世界杯/临场)是价值版EV口径的风控;ACC_MODE 的风控已由"甜区+联赛过滤"体现,
+  // 且甜区下沿54%会被"低概率<55%"误判成watch而不推,故 ACC_MODE 直接标 follow。
+  cands.forEach(c => { if (ACC_MODE) { c.follow = 'follow'; c.followText = '命中版出号'; c.riskTags = []; } else Object.assign(c, followProfile(c, now)); });
   cands.sort((a, b) => b.ev - a.ev);
   const followCands = cands.filter(c => c.follow === 'follow');
   const ahWatchCands = cands.filter(c => c.follow !== 'follow');
@@ -858,10 +879,14 @@ async function main(options = {}) {
       if (!checked.ok) { reject(checked.reason); continue; }
       current = checked.context.market;
     }
-    const title = `⚽价值号 EV+${(c.ev * 100).toFixed(0)}% · ${c.followText} · ${c.marketName}`;
+    const title = ACC_MODE
+      ? `⚽命中号 ${c.marketName} · 方向概率${(c.p * 100).toFixed(0)}%`
+      : `⚽价值号 EV+${(c.ev * 100).toFixed(0)}% · ${c.followText} · ${c.marketName}`;
     const risk = c.riskTags && c.riskTags.length ? `\n风险:${c.riskTags.join('、')}` : '';
     const srcTime = new Date(current.freshness.sourceUpdatedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false });
-    const body = `[${c.lg}] ${c.h} vs ${c.a}\n${pickLine(c)}\n模型${(c.p * 100).toFixed(1)}% · 五态EV+${(c.ev * 100).toFixed(1)} · 建议:${c.followText}${risk}\n赔率源更新 ${srcTime} · 快照 ${c.marketSnapshotId}\n今日第 ${todayCount + 1}/${DAILY_CAP} 注 · 系统记录注${c.stake}`;
+    const body = ACC_MODE
+      ? `[${c.lg}] ${c.h} vs ${c.a}\n${pickLine(c)}\n命中版方向概率${(c.p * 100).toFixed(1)}% · 参考EV+${(c.ev * 100).toFixed(1)}\n赔率源更新 ${srcTime} · 快照 ${c.marketSnapshotId}\n今日第 ${todayCount + 1}/${DAILY_CAP} 注 · 系统记录注${c.stake}`
+      : `[${c.lg}] ${c.h} vs ${c.a}\n${pickLine(c)}\n模型${(c.p * 100).toFixed(1)}% · 五态EV+${(c.ev * 100).toFixed(1)} · 建议:${c.followText}${risk}\n赔率源更新 ${srcTime} · 快照 ${c.marketSnapshotId}\n今日第 ${todayCount + 1}/${DAILY_CAP} 注 · 系统记录注${c.stake}`;
     if (DRY) { console.log('[DRY] 推送 →', title, '|', body.replace(/\n/g, ' / ')); todayCount++; sent++; continue; }
     const ok = await bark(title, body);
     if (!ok) { console.log('⚠️ Bark失败,本场下轮重试:', c.h, 'vs', c.a); continue; }
@@ -896,8 +921,8 @@ async function main(options = {}) {
     }
   }
 
-  if (!DRY && sent > 0) await sbSet('fp_pushState', state);
-  if (!DRY && valueBetsDirty) await sbSet('fp_valueBets', valueBets);
+  if (!DRY && sent > 0) await sbSet(PUSHSTATE_KEY, state);
+  if (!DRY && valueBetsDirty) await sbSet(BETS_KEY, valueBets);
 
   // ── 观察盘采样(1X2/EH):也必须使用与当前市场同 generation 的最新 version ──
   if (ENABLE_WATCH_RECORD) {
